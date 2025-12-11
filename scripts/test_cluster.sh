@@ -47,8 +47,8 @@ fi
 
 if [ $BLOCK_COUNT -gt 0 ]; then
     echo ""
-    echo "--- SAMPLE RECEIVED BLOCK ---"
-    grep "Received Block" node*.log | head -n 1
+    echo "--- ALL RECEIVED BLOCKS ---"
+    grep "Received Block" node*.log
 fi
 echo ""
 
