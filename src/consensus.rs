@@ -140,9 +140,9 @@ impl SimplexState {
             };
             
             // Check if we haven't already processed this QC to avoid dupes?
-            if !self.qcs.contains_key(&vote.view) {
+            if let std::collections::hash_map::Entry::Vacant(e) = self.qcs.entry(vote.view) {
                 log::info!("QC Formed for View {}", vote.view);
-                self.qcs.insert(vote.view, qc.clone());
+                e.insert(qc.clone());
                 
                 // If we are the leader for the NEXT view (qc.view + 1), PROPOSE!
                 let next_view = vote.view + 1;
