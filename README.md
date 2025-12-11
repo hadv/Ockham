@@ -18,7 +18,7 @@ The project is structured into modular components:
 *   **`consensus`**: The core State Machine. Handles proposals, vote aggregation, and the $3\Delta$ timeout logic.
 *   **`types`**: Core data structures including `Block`, `Vote`, and `QuorumCertificate` (QC).
 *   **`crypto`**: Abstracted cryptography layer (currently mocked for Phase 1, targeting BLS12-381).
-*   **`network`** (Planned): `libp2p` integration for peer discovery and gossip.
+*   **`network`**: `libp2p` implementation using Gossipsub for broadcasting Votes/Blocks and mDNS for peer discovery.
 
 ## Getting Started
 
@@ -31,6 +31,20 @@ The project is structured into modular components:
 ```bash
 cargo build --release
 ```
+
+### Running the Cluster (Phase 2)
+
+We provide a script to spin up a local 4-node cluster for demonstration:
+
+```bash
+./scripts/test_cluster.sh
+```
+
+This will:
+1.  Start a "Bootnode" (Node 0) on port 9000.
+2.  Start 3 other nodes that dial Node 0.
+3.  Wait for the cluster to form and run consensus.
+4.  Print a summary of QCs formed and Blocks finalized.
 
 ### Running Tests
 
@@ -50,7 +64,7 @@ This project is being developed in 4 phases:
     - Mock Cryptography.
     - Simulation Tests.
 
-- [ ] **Phase 2: The Networked Prototype** (In Progress)
+- [x] **Phase 2: The Networked Prototype**
     - `libp2p` integration.
     - Gossipsub configuration.
     - Network-based consensus tests.
