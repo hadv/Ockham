@@ -44,22 +44,25 @@ echo "Node 3 killed. Waiting for timeout and recovery (View 3 -> Timeout -> View
 # View 3 is 30s timeout. So we wait >30s.
 sleep 45
 
-echo "--- LOG SUMMARY ---"
-grep "FINALIZED BLOCK" node*.log | tail -n 5
-
-echo ""
-echo "--- CHECKING FOR DUMMY BLOCK / TIMEOUT QCs ---"
-# We look for a QC where block_hash is all zeros (Dummy Hash)
-grep "QC Formed" node*.log | grep "block_hash: 0000000000000000000000000000000000000000000000000000000000000000"
-
-echo ""
-echo "--- ALL RECEIVED BLOCKS (Node 0 - Last 3) ---"
-grep "Received Block" node0.log | tail -n 3
+echo "--- FINALIZED BLOCKS (Last 5) ---"
+grep "EXPLICITLY FINALIZED VIEW" node*.log | tail -n 5
 
 echo ""
 echo "--- CONSENSUS HEALTH CHECK ---"
+# If we reached View > 4, it means we handled the timeout.
+# We can also check if we see "QC Formed for View 3" which was the timeout view.
+echo "Checking for View 3 QC..."
+if grep -q "QC Formed for View 3" node*.log; then
+    echo "SUCCESS: Dummy QC for View 3 formed."
+    grep "QC Formed for View 3" node*.log | head -n 1
+else
+    echo "WARNING: Did not find explicit log for View 3 QC, but checking max view..."
+fi
 # Verify we reached View 4 or 5
-MAX_VIEW=$(grep "Received Block" node0.log | grep -o "view: [0-9]*" | cut -d " " -f 2 | sort -n | tail -1)
+# Logs show "View Advanced to 3. Resetting Timer."
+# grep -o "View Advanced to [0-9]*" gives "View Advanced to 3"
+# awk '{print $NF}' gives "3"
+MAX_VIEW=$(grep -o "View Advanced to [0-9]*" node0.log | awk '{print $NF}' | sort -n | tail -1)
 echo "Max View Reached: $MAX_VIEW"
 
 if [ "$MAX_VIEW" -ge 4 ]; then

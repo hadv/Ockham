@@ -50,13 +50,20 @@ impl Block {
     }
 }
 
+/// Type of vote: Notarize (for block validity) or Finalize (for view completeness)
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum VoteType {
+    Notarize,
+    Finalize,
+}
+
 /// A Vote from a validator for a specific block (Notarization) or view (Finalization/Timeout).
-/// In Simplex, a timeout creates a vote for a "Dummy Block" which effectively
-/// allows moving to the next view.
+/// In Simplex, a timeout creates a vote for a "Dummy Block" (Notarize ZeroHash).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Vote {
     pub view: View,
-    pub block_hash: Hash, // The block being voted for (or ZeroHash/DummyHash)
+    pub block_hash: Hash,    // The block being voted for (or ZeroHash/DummyHash)
+    pub vote_type: VoteType, // Distinguish between Notarize and Finalize
     pub author: PublicKey,
     pub signature: Signature,
 }

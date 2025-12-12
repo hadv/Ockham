@@ -98,9 +98,8 @@ fn test_three_chain_commit() {
 
     for node in &mut other_nodes {
         // ensure they have b1
-        if !node.blocks.contains_key(&b1_hash) {
-            node.blocks.insert(b1_hash, b1.clone());
-        }
+        // ensure they have b1
+        node.blocks.entry(b1_hash).or_insert_with(|| b1.clone());
         if let Some(v) = extract_vote(node.on_proposal(b2.clone()).unwrap()) {
             votes_v2.push(v);
         }

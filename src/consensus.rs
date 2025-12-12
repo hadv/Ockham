@@ -1,5 +1,5 @@
 use crate::crypto::{Hash, PrivateKey, PublicKey, hash_data, sign, verify};
-use crate::types::{Block, QuorumCertificate, View, Vote};
+use crate::types::{Block, QuorumCertificate, View, Vote, VoteType};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -30,13 +30,18 @@ pub struct SimplexState {
     pub committee: Vec<PublicKey>,
     pub current_view: View,
     pub finalized_height: View,
+    pub preferred_block: Hash,
+    pub preferred_view: View,
 
     // Storage (mocked in memory)
     pub blocks: HashMap<Hash, Block>,
     pub qcs: HashMap<View, QuorumCertificate>,
 
     // Vote Aggregation
+    // Vote Aggregation (split by type roughly, or just filter)
     pub votes_received: HashMap<View, HashMap<PublicKey, Vote>>,
+    // Track Finalize votes separately for easier counting
+    pub finalize_votes_received: HashMap<View, HashMap<PublicKey, Vote>>,
 }
 
 impl SimplexState {
@@ -61,9 +66,12 @@ impl SimplexState {
             committee,
             current_view: 1, // Start at view 1
             finalized_height: 0,
+            preferred_block: genesis_hash,
+            preferred_view: 0,
             blocks,
             qcs,
             votes_received: HashMap::new(),
+            finalize_votes_received: HashMap::new(),
         }
     }
 
@@ -77,7 +85,14 @@ impl SimplexState {
                     self.current_view
                 );
                 // Parent is the block this QC certifies
-                let parent_hash = qc.block_hash;
+                // FIX: If QC is for a dummy block (ZeroHash), we must extend the last real block (preferred_block)
+                let is_dummy = qc.block_hash == Hash::default();
+
+                let parent_hash = if is_dummy {
+                    self.preferred_block
+                } else {
+                    qc.block_hash
+                };
                 let block = self.create_proposal(self.current_view, qc.clone(), parent_hash)?;
                 return Ok(vec![ConsensusAction::BroadcastBlock(block)]);
             }
@@ -103,6 +118,8 @@ impl SimplexState {
 
         // 3. Verify QC
         self.verify_qc(&block.justify)?;
+        // Update preferred chain if this QC justifies a better block
+        self.update_preferred_chain(&block.justify);
 
         // 4. Update state (store block)
         let block_hash = hash_data(&block);
@@ -115,12 +132,29 @@ impl SimplexState {
         }
 
         // 6. Generate Vote
-        let vote = self.create_vote(block.view, block_hash);
+        let vote = self.create_vote(block.view, block_hash, VoteType::Notarize);
 
-        // 7. Try Finalize (Chain Commit)
-        self.try_finalize(&block);
+        // 7. Check if we should broadcast Finalize?
+        // Simplex Rule: If we see a notarized blockchain of length h, broadcast Finalize(h).
+        // Since we just validated `block` which has a QC for `block.view - 1` (roughly),
+        // we can try to finalize the parent view?
+        // Actually, if we see a valid QC for View V, we can broadcast Finalize(V).
+        // Let's implement that in `on_proposal` (since we verified block's QC) and `on_vote` (when we form a QC).
+        let mut actions = vec![ConsensusAction::BroadcastVote(vote)];
 
-        Ok(vec![ConsensusAction::BroadcastVote(vote)])
+        // If this block came with a valid QC for (View-1), we can vote to finalize View-1.
+        // Or if this block itself represents a success for the current view?
+        // Simplex text: "on seeing 2n/3 votes for block b_h (notarized)... sends Finalize(h)"
+        // Since we just accepted block_h, we haven't seen 2n/3 votes for IT yet.
+        // But the QC inside it proves (View-1) was notarized.
+        let qc_view = block.justify.view;
+        if qc_view > 0 {
+            let finalize_vote =
+                self.create_vote(qc_view, block.justify.block_hash, VoteType::Finalize);
+            actions.push(ConsensusAction::BroadcastVote(finalize_vote));
+        }
+
+        Ok(actions)
     }
 
     /// Handle an incoming vote.
@@ -129,6 +163,10 @@ impl SimplexState {
         // Verify signature (mocked)
         if !verify(&vote.author, &vote.block_hash.0, &vote.signature) {
             // For mock, we verify hash matches signature content.
+        }
+
+        if vote.vote_type == VoteType::Finalize {
+            return self.on_finalize_vote(vote);
         }
 
         let view_votes = self.votes_received.entry(vote.view).or_default();
@@ -159,8 +197,14 @@ impl SimplexState {
             if let std::collections::hash_map::Entry::Vacant(e) = self.qcs.entry(vote.view) {
                 log::info!("QC Formed for View {}", vote.view);
                 e.insert(qc.clone());
+                self.update_preferred_chain(&qc);
 
                 let next_view = vote.view + 1;
+
+                // Broadcast Finalize for this View (since it is now notarized!)
+                let finalize_vote =
+                    self.create_vote(vote.view, vote.block_hash, VoteType::Finalize);
+                let mut actions = vec![ConsensusAction::BroadcastVote(finalize_vote)];
                 if next_view > self.current_view {
                     self.current_view = next_view;
                 }
@@ -168,10 +212,18 @@ impl SimplexState {
                 // If we are the leader for the NEXT view (qc.view + 1), PROPOSE!
                 if self.is_leader(next_view) {
                     log::info!("I am the leader for View {}! Proposing block...", next_view);
-                    if let Ok(block) = self.create_proposal(next_view, qc, vote.block_hash) {
-                        return Ok(vec![ConsensusAction::BroadcastBlock(block)]);
+                    // FIX: If QC (from vote) is for a dummy block, extend preferred_block
+                    let parent_hash = if vote.block_hash == Hash::default() {
+                        self.preferred_block
+                    } else {
+                        vote.block_hash
+                    };
+
+                    if let Ok(block) = self.create_proposal(next_view, qc, parent_hash) {
+                        actions.push(ConsensusAction::BroadcastBlock(block));
                     }
                 }
+                return Ok(actions);
             }
             return Ok(vec![]);
         }
@@ -188,17 +240,18 @@ impl SimplexState {
 
         // Simplex timeout -> Vote for dummy
         let dummy_hash = Hash([0u8; 32]);
-        let vote = self.create_vote(view, dummy_hash);
+        let vote = self.create_vote(view, dummy_hash, VoteType::Notarize);
 
         Ok(vec![ConsensusAction::BroadcastVote(vote)])
     }
 
-    fn create_vote(&self, view: View, block_hash: Hash) -> Vote {
+    fn create_vote(&self, view: View, block_hash: Hash, vote_type: VoteType) -> Vote {
         // Sign the block hash
         let signature = sign(&self.my_key, &block_hash.0);
         Vote {
             view,
             block_hash,
+            vote_type,
             author: self.my_id,
             signature,
         }
@@ -225,31 +278,21 @@ impl SimplexState {
         Ok(block)
     }
 
-    fn try_finalize(&mut self, head: &Block) {
-        // 1. Parent (P)
-        let parent_hash = head.justify.block_hash;
-        if let Some(parent) = self.blocks.get(&parent_hash) {
-            // 2. Grandparent (GP)
-            let gp_hash = parent.justify.block_hash;
-            if let Some(gp) = self.blocks.get(&gp_hash) {
-                log::info!(
-                    "TryFinalize Check: Head(v{}) -> Parent(v{}) -> GP(v{})",
-                    head.view,
-                    parent.view,
-                    gp.view
-                );
-                // 3. Great-Grandparent (GGP) - Optional 3-chain check, or just commit GP (2-chain)
-                // Let's commit GP if it's new, OR if it's Genesis and we haven't finalized anything yet (for demo)
-                if gp.view > self.finalized_height || (gp.view == 0 && self.finalized_height == 0) {
-                    self.finalized_height = gp.view;
-                    log::info!("FINALIZED BLOCK: {:?}", gp);
-                }
-            } else {
-                log::warn!("TryFinalize: GP not found for Parent(v{})", parent.view);
+    // try_finalize removed in favor of on_finalize_vote
+    fn on_finalize_vote(&mut self, vote: Vote) -> Result<Vec<ConsensusAction>, ConsensusError> {
+        let view_votes = self.finalize_votes_received.entry(vote.view).or_default();
+        view_votes.insert(vote.author, vote.clone());
+
+        let threshold = (self.committee.len() * 2) / 3 + 1;
+        if view_votes.len() >= threshold {
+            // Explicit Simplex Finalization!
+            if vote.view > self.finalized_height {
+                self.finalized_height = vote.view;
+                log::info!("EXPLICITLY FINALIZED VIEW: {}", vote.view);
+                // In real impl, we would commit transactions here.
             }
-        } else {
-            log::warn!("TryFinalize: Parent not found for Head(v{})", head.view);
         }
+        Ok(vec![])
     }
 
     fn verify_qc(&self, qc: &QuorumCertificate) -> Result<(), ConsensusError> {
@@ -257,5 +300,13 @@ impl SimplexState {
             return Ok(());
         }
         Ok(())
+    }
+
+    fn update_preferred_chain(&mut self, qc: &QuorumCertificate) {
+        // If the QC certifies a real block (not dummy), and it's higher than what we have, update.
+        if qc.block_hash != Hash::default() && qc.view >= self.preferred_view {
+            self.preferred_view = qc.view;
+            self.preferred_block = qc.block_hash;
+        }
     }
 }
