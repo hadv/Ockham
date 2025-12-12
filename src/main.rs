@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let db_path = format!("./db/node_{}", id_arg);
     let storage =
-        Box::new(ockham::storage::RocksStorage::new(db_path).expect("Failed to create DB"));
+        Box::new(ockham::storage::RedbStorage::new(db_path).expect("Failed to create DB"));
 
     let mut state = SimplexState::new(my_id, my_key, committee, storage);
 
@@ -93,11 +93,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 queue.extend(vote_actions);
                                              }
                                          }
+                                         ConsensusAction::BroadcastRequest(hash) => {
+                                             network.broadcast_sync(ockham::types::SyncMessage::RequestBlock(hash)).await;
+                                         }
+                                         ConsensusAction::SendBlock(block, _) => {
+                                             network.broadcast_sync(ockham::types::SyncMessage::ResponseBlock(Box::new(block))).await;
+                                         }
                                      }
                                  }
                              }
                         }
                         Ok(vec![])
+                    }
+                    NetworkEvent::SyncMessageReceived(msg, peer_id) => {
+                        match msg {
+                            ockham::types::SyncMessage::RequestBlock(hash) => {
+                                log::info!("Received Block Request for {:?}", hash);
+                                state.on_block_request(hash, peer_id)
+                            }
+                            ockham::types::SyncMessage::ResponseBlock(block) => {
+                                log::info!("Received Block Response (Sync) View {}", block.view);
+                                state.on_block_response(*block)
+                            }
+                        }
                     }
                 };
 
@@ -127,6 +145,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                          if let Ok(vote_actions) = state.on_proposal(block) {
                                             action_queue.extend(vote_actions);
                                          }
+                                     }
+                                     ConsensusAction::BroadcastRequest(hash) => {
+                                         network.broadcast_sync(ockham::types::SyncMessage::RequestBlock(hash)).await;
+                                     }
+                                     ConsensusAction::SendBlock(block, _) => {
+                                         // For MVP, broadcast response to gossip
+                                         network.broadcast_sync(ockham::types::SyncMessage::ResponseBlock(Box::new(block))).await;
                                      }
                                  }
                              }
@@ -162,6 +187,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                  ConsensusAction::BroadcastBlock(block) => {
                                      log::info!("Broadcasting Block: {:?}", block);
                                      network.broadcast_block(block).await;
+                                 }
+                                 ConsensusAction::BroadcastRequest(hash) => {
+                                     network.broadcast_sync(ockham::types::SyncMessage::RequestBlock(hash)).await;
+                                 }
+                                 ConsensusAction::SendBlock(block, _) => {
+                                     network.broadcast_sync(ockham::types::SyncMessage::ResponseBlock(Box::new(block))).await;
                                  }
                              }
                          }

@@ -75,3 +75,10 @@ pub struct QuorumCertificate {
     pub block_hash: Hash,
     pub signatures: Vec<(PublicKey, Signature)>, // In real impl, this would be an aggregated sig + bitfield
 }
+
+/// Messages used for Block Synchronization
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum SyncMessage {
+    RequestBlock(Hash),
+    ResponseBlock(Box<Block>),
+}

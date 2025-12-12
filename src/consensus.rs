@@ -22,7 +22,10 @@ pub enum ConsensusError {
 pub enum ConsensusAction {
     BroadcastVote(Vote),
     BroadcastBlock(Block),
-    // In a real implementation, we'd have Timer start/stop actions here
+    // Sync Actions
+    BroadcastRequest(Hash),
+    SendBlock(Block, String), // Respond to a specific peer (String is PeerId)
+                              // In a real implementation, we'd have Timer start/stop actions here
 }
 
 pub struct SimplexState {
@@ -42,6 +45,10 @@ pub struct SimplexState {
     pub votes_received: HashMap<View, HashMap<PublicKey, Vote>>,
     // Track Finalize votes separately for easier counting
     pub finalize_votes_received: HashMap<View, HashMap<PublicKey, Vote>>,
+
+    // Sync: Orphan Buffer
+    // Map: ParentHash -> List of Orphan Blocks waiting for that parent
+    pub orphans: HashMap<Hash, Vec<Block>>,
 }
 
 impl SimplexState {
@@ -70,6 +77,7 @@ impl SimplexState {
                 storage,
                 votes_received: HashMap::new(),
                 finalize_votes_received: HashMap::new(),
+                orphans: HashMap::new(),
             };
         }
 
@@ -110,6 +118,7 @@ impl SimplexState {
             storage,
             votes_received: HashMap::new(),
             finalize_votes_received: HashMap::new(),
+            orphans: HashMap::new(),
         }
     }
 
@@ -138,19 +147,14 @@ impl SimplexState {
         Ok(vec![])
     }
 
-    /// Handle a new proposal.
-    /// Returns actions to perform (e.g. BroadcastVote).
-    pub fn on_proposal(&mut self, block: Block) -> Result<Vec<ConsensusAction>, ConsensusError> {
-        // 1. Basic checks
-        if block.view < self.current_view {
-            // Check if it's irrelevant or old
-            return Err(ConsensusError::InvalidView);
-        }
-
-        // 2. Check Parent (Simplex Lineage)
-        // Check if parent block exists in storage.
-        // Note: For dummy blocks (ZeroHash), we might not have them explicitly saved, but they map to Genesis conceptually.
-        // However, Simplex logic says extends from parent.
+    /// Shared logic for validating and storing a block (Proposal or Sync).
+    /// Returns true if the block was successfully stored (or already existed).
+    /// Returns Actions (RequestBlock) if Orphan.
+    fn validate_and_store_block(
+        &mut self,
+        block: Block,
+    ) -> Result<(bool, Vec<ConsensusAction>), ConsensusError> {
+        // 1. Check Parent (Simplex Lineage)
         if block.parent_hash != Hash::default()
             && self
                 .storage
@@ -158,41 +162,60 @@ impl SimplexState {
                 .unwrap()
                 .is_none()
         {
-            return Err(ConsensusError::InvalidParent);
+            // Orphan Logic: Buffer and Request Parent
+            log::info!(
+                "Received Orphan Block View {}. Parent {:?} missing. Buffering and Requesting...",
+                block.view,
+                block.parent_hash
+            );
+            self.orphans
+                .entry(block.parent_hash)
+                .or_default()
+                .push(block.clone());
+            return Ok((
+                false,
+                vec![ConsensusAction::BroadcastRequest(block.parent_hash)],
+            ));
         }
 
-        // 3. Verify QC
+        // 2. Verify QC
         self.verify_qc(&block.justify)?;
-        // Update preferred chain if this QC justifies a better block
+
+        // 3. Update preferred chain if this QC justifies a better block
         self.update_preferred_chain(&block.justify);
 
         // 4. Update state (store block)
-        let block_hash = hash_data(&block);
         self.storage.save_block(&block).unwrap();
 
-        // 5. Update view if needed (fast forward)
-        // Note: Simplex logic typically updates view on QC, but receiving a valid proposal for higher view implies previous views were successful.
+        Ok((true, vec![]))
+    }
+
+    /// Handle a new proposal.
+    pub fn on_proposal(&mut self, block: Block) -> Result<Vec<ConsensusAction>, ConsensusError> {
+        // 1. View Check (Strict for proposals)
+        if block.view < self.current_view {
+            // For live proposals, late blocks are irrelevant
+            return Err(ConsensusError::InvalidView);
+        }
+
+        // 2. Common Validation & Storage
+        let (stored, mut actions) = self.validate_and_store_block(block.clone())?;
+        if !stored {
+            return Ok(actions); // It was an orphan, request sent
+        }
+
+        // 3. Update view if needed (fast forward)
         if block.view >= self.current_view {
             self.current_view = block.view;
             self.persist_state();
         }
 
-        // 6. Generate Vote
+        // 4. Generate Vote
+        let block_hash = hash_data(&block);
         let vote = self.create_vote(block.view, block_hash, VoteType::Notarize);
+        actions.push(ConsensusAction::BroadcastVote(vote));
 
-        // 7. Check if we should broadcast Finalize?
-        // Simplex Rule: If we see a notarized blockchain of length h, broadcast Finalize(h).
-        // Since we just validated `block` which has a QC for `block.view - 1` (roughly),
-        // we can try to finalize the parent view?
-        // Actually, if we see a valid QC for View V, we can broadcast Finalize(V).
-        // Let's implement that in `on_proposal` (since we verified block's QC) and `on_vote` (when we form a QC).
-        let mut actions = vec![ConsensusAction::BroadcastVote(vote)];
-
-        // If this block came with a valid QC for (View-1), we can vote to finalize View-1.
-        // Or if this block itself represents a success for the current view?
-        // Simplex text: "on seeing 2n/3 votes for block b_h (notarized)... sends Finalize(h)"
-        // Since we just accepted block_h, we haven't seen 2n/3 votes for IT yet.
-        // But the QC inside it proves (View-1) was notarized.
+        // 5. Check if we should broadcast Finalize
         let qc_view = block.justify.view;
         if qc_view > 0 {
             let finalize_vote =
@@ -369,5 +392,57 @@ impl SimplexState {
         if let Err(e) = self.storage.save_consensus_state(&state) {
             log::error!("Failed to persist state: {:?}", e);
         }
+    }
+
+    /// Handle a Block Request from a peer.
+    pub fn on_block_request(
+        &self,
+        block_hash: Hash,
+        peer_id: String,
+    ) -> Result<Vec<ConsensusAction>, ConsensusError> {
+        if let Ok(Some(block)) = self.storage.get_block(&block_hash) {
+            log::info!("Serving Block Request for {:?}", block_hash);
+            return Ok(vec![ConsensusAction::SendBlock(block, peer_id)]);
+        }
+        Ok(vec![])
+    }
+
+    /// Handle a Block Response (Synced Block).
+    pub fn on_block_response(
+        &mut self,
+        block: Block,
+    ) -> Result<Vec<ConsensusAction>, ConsensusError> {
+        log::info!("Received Synced Block View {}", block.view);
+
+        // Use shared validation logic (allows old blocks!)
+        let (stored, mut actions) = self.validate_and_store_block(block.clone())?;
+
+        if !stored {
+            // It was an orphan, request sent via actions
+            return Ok(actions);
+        }
+
+        // Fast-forward view if we synced a newer block
+        if block.view >= self.current_view {
+            self.current_view = block.view;
+            self.persist_state();
+        }
+
+        // Check if this block fills any gaps (is a parent for orphans)
+        let block_hash = hash_data(&block);
+        if let Some(orphans) = self.orphans.remove(&block_hash) {
+            log::info!(
+                "Processed Orphan Parent. Re-processing {} orphans...",
+                orphans.len()
+            );
+            for orphan in orphans {
+                // Recursively process orphans
+                if let Ok(orphan_actions) = self.on_block_response(orphan) {
+                    actions.extend(orphan_actions);
+                }
+            }
+        }
+
+        Ok(actions)
     }
 }
