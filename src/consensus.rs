@@ -304,11 +304,9 @@ impl SimplexState {
 
     fn update_preferred_chain(&mut self, qc: &QuorumCertificate) {
         // If the QC certifies a real block (not dummy), and it's higher than what we have, update.
-        if qc.block_hash != Hash::default() {
-            if qc.view >= self.preferred_view {
-                self.preferred_view = qc.view;
-                self.preferred_block = qc.block_hash;
-            }
+        if qc.block_hash != Hash::default() && qc.view >= self.preferred_view {
+            self.preferred_view = qc.view;
+            self.preferred_block = qc.block_hash;
         }
     }
 }

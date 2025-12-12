@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 use ockham::consensus::{ConsensusAction, SimplexState};
 use ockham::crypto::{PrivateKey, PublicKey, hash_data};
 use ockham::types::{Block, QuorumCertificate, VoteType};
@@ -84,16 +85,16 @@ fn test_explicit_finalization() {
     let _ = node0.on_vote(finalize_vote_0);
 
     // Fabricate finalize votes from Node 1, 2
-    for i in 1..3 {
-        let sig = ockham::crypto::sign(&keys[i].1, &b1_hash.0);
-        let fvote = ockham::types::Vote {
-            view: 1,
-            block_hash: b1_hash,
-            vote_type: VoteType::Finalize,
-            author: keys[i].0,
-            signature: sig,
-        };
-        let _ = node0.on_vote(fvote);
+    for (pk, sk) in keys.iter().skip(1).take(2) {
+         let sig = ockham::crypto::sign(sk, &b1_hash.0);
+         let fvote = ockham::types::Vote {
+             view: 1,
+             block_hash: b1_hash,
+             vote_type: VoteType::Finalize,
+             author: *pk,
+             signature: sig
+         };
+         let _ = node0.on_vote(fvote);
     }
 
     // 7. Assert Finalization
