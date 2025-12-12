@@ -2,3 +2,5 @@
 **/*.rs.bk
 node*.log
 discussion.json
+
+db/

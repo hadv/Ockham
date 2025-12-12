@@ -1,4 +1,5 @@
 use crate::crypto::{Hash, PrivateKey, PublicKey, hash_data, sign, verify};
+use crate::storage::{ConsensusState, Storage};
 use crate::types::{Block, QuorumCertificate, View, Vote, VoteType};
 use std::collections::HashMap;
 use thiserror::Error;
@@ -33,9 +34,8 @@ pub struct SimplexState {
     pub preferred_block: Hash,
     pub preferred_view: View,
 
-    // Storage (mocked in memory)
-    pub blocks: HashMap<Hash, Block>,
-    pub qcs: HashMap<View, QuorumCertificate>,
+    // Storage (Abstracted)
+    pub storage: Box<dyn Storage>,
 
     // Vote Aggregation
     // Vote Aggregation (split by type roughly, or just filter)
@@ -45,8 +45,35 @@ pub struct SimplexState {
 }
 
 impl SimplexState {
-    pub fn new(my_id: PublicKey, my_key: PrivateKey, committee: Vec<PublicKey>) -> Self {
-        // Create Genesis Block
+    pub fn new(
+        my_id: PublicKey,
+        my_key: PrivateKey,
+        committee: Vec<PublicKey>,
+        storage: Box<dyn Storage>,
+    ) -> Self {
+        // Attempt to load existing state
+        if let Ok(Some(saved_state)) = storage.get_consensus_state() {
+            log::info!(
+                "Loaded persistent state: View {}, Finalized {}, Preferred View {}",
+                saved_state.view,
+                saved_state.finalized_height,
+                saved_state.preferred_view
+            );
+            return Self {
+                my_id,
+                my_key,
+                committee,
+                current_view: saved_state.view,
+                finalized_height: saved_state.finalized_height,
+                preferred_block: saved_state.preferred_block,
+                preferred_view: saved_state.preferred_view,
+                storage,
+                votes_received: HashMap::new(),
+                finalize_votes_received: HashMap::new(),
+            };
+        }
+
+        // Initialize Genesis
         let genesis_qc = QuorumCertificate::default();
         let genesis_block = Block::new(
             crate::crypto::generate_keypair_from_id(0).0,
@@ -57,24 +84,30 @@ impl SimplexState {
         );
         let genesis_hash = hash_data(&genesis_block);
 
-        let mut blocks = HashMap::new();
-        blocks.insert(genesis_hash, genesis_block.clone());
-        // Map Dummy Hash to Genesis to handle timeouts/genesis-parent check
-        blocks.insert(Hash::default(), genesis_block);
+        // Save Genesis
+        storage.save_block(&genesis_block).unwrap();
+        // Dummy block for timeouts (mapped to genesis for simplicity or just empty)
+        // In this implementation, we might not strictly need to save dummy explicitly if code handles it,
+        // but let's save genesis as the "default" block.
+        storage.save_qc(&genesis_qc).unwrap();
 
-        let mut qcs = HashMap::new();
-        qcs.insert(0, genesis_qc.clone());
+        let initial_state = ConsensusState {
+            view: 1,
+            finalized_height: 0,
+            preferred_block: genesis_hash,
+            preferred_view: 0,
+        };
+        storage.save_consensus_state(&initial_state).unwrap();
 
         Self {
             my_id,
             my_key,
             committee,
-            current_view: 1, // Start at view 1
-            finalized_height: 0,
-            preferred_block: genesis_hash,
-            preferred_view: 0,
-            blocks,
-            qcs,
+            current_view: initial_state.view,
+            finalized_height: initial_state.finalized_height,
+            preferred_block: initial_state.preferred_block,
+            preferred_view: initial_state.preferred_view,
+            storage,
             votes_received: HashMap::new(),
             finalize_votes_received: HashMap::new(),
         }
@@ -84,7 +117,7 @@ impl SimplexState {
     pub fn try_propose(&mut self) -> Result<Vec<ConsensusAction>, ConsensusError> {
         if self.is_leader(self.current_view) {
             let prev_view = self.current_view - 1;
-            if let Some(qc) = self.qcs.get(&prev_view) {
+            if let Ok(Some(qc)) = self.storage.get_qc(prev_view) {
                 log::info!(
                     "I am the leader for View {}! Proposing block...",
                     self.current_view
@@ -115,9 +148,16 @@ impl SimplexState {
         }
 
         // 2. Check Parent (Simplex Lineage)
-        if !self.blocks.contains_key(&block.parent_hash) {
-            // In a real system, we would buffer or request sync.
-            // Here we error for simplicity of the unit test.
+        // Check if parent block exists in storage.
+        // Note: For dummy blocks (ZeroHash), we might not have them explicitly saved, but they map to Genesis conceptually.
+        // However, Simplex logic says extends from parent.
+        if block.parent_hash != Hash::default()
+            && self
+                .storage
+                .get_block(&block.parent_hash)
+                .unwrap()
+                .is_none()
+        {
             return Err(ConsensusError::InvalidParent);
         }
 
@@ -128,12 +168,13 @@ impl SimplexState {
 
         // 4. Update state (store block)
         let block_hash = hash_data(&block);
-        self.blocks.insert(block_hash, block.clone());
+        self.storage.save_block(&block).unwrap();
 
         // 5. Update view if needed (fast forward)
         // Note: Simplex logic typically updates view on QC, but receiving a valid proposal for higher view implies previous views were successful.
         if block.view >= self.current_view {
             self.current_view = block.view;
+            self.persist_state();
         }
 
         // 6. Generate Vote
@@ -199,9 +240,9 @@ impl SimplexState {
             };
 
             // Check if we haven't already processed this QC to avoid dupes?
-            if let std::collections::hash_map::Entry::Vacant(e) = self.qcs.entry(vote.view) {
+            if self.storage.get_qc(vote.view).unwrap().is_none() {
                 log::info!("QC Formed for View {}", vote.view);
-                e.insert(qc.clone());
+                self.storage.save_qc(&qc).unwrap();
                 self.update_preferred_chain(&qc);
 
                 let next_view = vote.view + 1;
@@ -212,6 +253,7 @@ impl SimplexState {
                 let mut actions = vec![ConsensusAction::BroadcastVote(finalize_vote)];
                 if next_view > self.current_view {
                     self.current_view = next_view;
+                    self.persist_state();
                 }
 
                 // If we are the leader for the NEXT view (qc.view + 1), PROPOSE!
@@ -294,6 +336,7 @@ impl SimplexState {
             if vote.view > self.finalized_height {
                 self.finalized_height = vote.view;
                 log::info!("EXPLICITLY FINALIZED VIEW: {}", vote.view);
+                self.persist_state();
                 // In real impl, we would commit transactions here.
             }
         }
@@ -312,6 +355,19 @@ impl SimplexState {
         if qc.block_hash != Hash::default() && qc.view >= self.preferred_view {
             self.preferred_view = qc.view;
             self.preferred_block = qc.block_hash;
+            self.persist_state();
+        }
+    }
+
+    fn persist_state(&self) {
+        let state = ConsensusState {
+            view: self.current_view,
+            finalized_height: self.finalized_height,
+            preferred_block: self.preferred_block,
+            preferred_view: self.preferred_view,
+        };
+        if let Err(e) = self.storage.save_consensus_state(&state) {
+            log::error!("Failed to persist state: {:?}", e);
         }
     }
 }

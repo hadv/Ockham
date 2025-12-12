@@ -15,14 +15,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(1)
         .expect("Usage: cargo run -- <node_id>")
         .parse::<u64>()?;
+    // 2. Initialize Consensus
     let (my_id, my_key) = ockham::crypto::generate_keypair_from_id(id_arg);
-
-    log::info!("Starting Node {}", id_arg);
-
-    // 2. Setup Committee (Fixed 5 nodes for milestone)
     let committee: Vec<PublicKey> = (0..5)
         .map(|i| ockham::crypto::generate_keypair_from_id(i).0)
         .collect();
+
+    let db_path = format!("./db/node_{}", id_arg);
+    let storage =
+        Box::new(ockham::storage::RocksStorage::new(db_path).expect("Failed to create DB"));
+
+    let mut state = SimplexState::new(my_id, my_key, committee, storage);
+
+    log::info!("Starting Node {}", id_arg);
 
     // 3. Initialize Network
     // Node 0 Listen on 9000, others random (0)
@@ -36,7 +41,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 4. Initialize Consensus State
-    let mut state = SimplexState::new(my_id, my_key, committee.clone());
 
     // 5. Timer for Views (Simple timeout for prototype)
     let mut view_timer = time::interval(Duration::from_secs(30));

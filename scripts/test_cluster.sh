@@ -3,6 +3,10 @@
 trap "kill 0" EXIT
 
 # Build
+echo "Cleaning DB and Logs..."
+rm -rf ./db
+rm -f node*.log
+
 echo "Building..."
 cargo build --quiet
 

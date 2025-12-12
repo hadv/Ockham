@@ -10,8 +10,14 @@ fn test_timeout_chain_extension() {
     let committee: Vec<PublicKey> = keys.iter().map(|k| k.0.clone()).collect();
 
     // Node 0
-    let mut node0 = SimplexState::new(keys[0].0.clone(), keys[0].1.clone(), committee.clone());
-    let genesis_block_hash = hash_data(node0.blocks.values().next().unwrap());
+    let storage = Box::new(ockham::storage::MemStorage::new());
+    let mut node0 = SimplexState::new(
+        keys[0].0.clone(),
+        keys[0].1.clone(),
+        committee.clone(),
+        storage,
+    );
+    let genesis_block_hash = node0.preferred_block;
 
     // --- VIEW 1 (Normal) ---
     // Create Block 1
@@ -51,7 +57,7 @@ fn test_timeout_chain_extension() {
     node0.on_vote(v2).unwrap();
 
     // Check QC2 is formed (Dummy)
-    let qc2 = node0.qcs.get(&2).expect("QC2 should exist");
+    let qc2 = node0.storage.get_qc(2).unwrap().expect("QC2 should exist");
     assert_eq!(qc2.block_hash, ockham::crypto::Hash::default());
 
     // Check Preferred Block is STILL B1 (Not Dummy)
