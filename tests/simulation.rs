@@ -10,20 +10,23 @@ fn test_three_chain_commit() {
     let committee: Vec<PublicKey> = keys.iter().map(|k| k.0.clone()).collect();
 
     // Instantiate State for Node 0 (Leader 1)
-    let mut node0 = SimplexState::new(keys[0].0.clone(), keys[0].1.clone(), committee.clone());
-
-    // Instantiate State for Node 1, 2, 3
-    let mut other_nodes: Vec<SimplexState> = keys
-        .iter()
-        .skip(1)
-        .map(|(pk, sk)| SimplexState::new(pk.clone(), sk.clone(), committee.clone()))
+    let mut nodes: Vec<SimplexState> = (0..4)
+        .map(|i| {
+            let storage = Box::new(ockham::storage::MemStorage::new());
+            SimplexState::new(
+                keys[i].0.clone(),
+                keys[i].1.clone(),
+                committee.clone(),
+                storage,
+            )
+        })
         .collect();
 
-    println!("Genesis: {:?}", node0.blocks.keys());
+    println!("Genesis: {:?}", nodes[0].preferred_block);
 
     // --- VIEW 1: PREPARE b1 ---
     // Leader 0 creates Block 1 (parent = Genesis)
-    let genesis_hash = hash_data(node0.blocks.values().next().unwrap());
+    let genesis_hash = nodes[0].preferred_block;
     let qc0 = QuorumCertificate::default(); // genesis QC
     let b1 = Block::new(keys[0].0.clone(), 1, genesis_hash, qc0, vec![1, 2, 3]);
     let b1_hash = hash_data(&b1);
@@ -44,12 +47,12 @@ fn test_three_chain_commit() {
     };
 
     // Node 0 votes
-    if let Some(v) = extract_vote(node0.on_proposal(b1.clone()).unwrap()) {
+    if let Some(v) = extract_vote(nodes[0].on_proposal(b1.clone()).unwrap()) {
         votes_v1.push(v);
     }
 
     // Others vote
-    for node in &mut other_nodes {
+    for node in nodes.iter_mut().skip(1) {
         if let Some(v) = extract_vote(node.on_proposal(b1.clone()).unwrap()) {
             votes_v1.push(v);
         }
@@ -65,10 +68,10 @@ fn test_three_chain_commit() {
         // Note: on_vote now returns Vec<Action>, which is empty for now unless we implement auto-proposal.
         // But the QC is formed internally in `node0.qcs`.
 
-        let _ = node0.on_vote(vote.clone()).unwrap();
+        let _ = nodes[0].on_vote(vote.clone()).unwrap();
 
         // Check if QC was formed in state
-        if let Some(qc) = node0.qcs.get(&1) {
+        if let Ok(Some(qc)) = nodes[0].storage.get_qc(1) {
             qc1 = Some(qc.clone());
             break;
         }
@@ -82,7 +85,7 @@ fn test_three_chain_commit() {
     // Leader 1 (Node 1) proposes Block 2 (parent = b1)
     // First, Node 1 needs to know about b1 and QC1 (sync/gossip)
     // We manually update Node 1 state
-    other_nodes[0].blocks.insert(b1_hash, b1.clone());
+    nodes[1].storage.save_block(&b1).unwrap();
 
     // Node 1 proposes b2
     let b2 = Block::new(keys[1].0.clone(), 2, b1_hash, qc1.clone(), vec![4, 5, 6]);
@@ -92,14 +95,13 @@ fn test_three_chain_commit() {
     let mut votes_v2 = vec![];
 
     // Node 0 needs to see b2 (and its parent logic checks out)
-    if let Some(v) = extract_vote(node0.on_proposal(b2.clone()).unwrap()) {
+    if let Some(v) = extract_vote(nodes[0].on_proposal(b2.clone()).unwrap()) {
         votes_v2.push(v);
     }
 
-    for node in &mut other_nodes {
+    for node in nodes.iter_mut().skip(1) {
         // ensure they have b1
-        // ensure they have b1
-        node.blocks.entry(b1_hash).or_insert_with(|| b1.clone());
+        node.storage.save_block(&b1).unwrap();
         if let Some(v) = extract_vote(node.on_proposal(b2.clone()).unwrap()) {
             votes_v2.push(v);
         }
@@ -108,8 +110,8 @@ fn test_three_chain_commit() {
     // Aggregate QC2 (Node 0 does it again for tracking)
     let mut qc2 = None;
     for vote in votes_v2 {
-        let _ = node0.on_vote(vote).unwrap();
-        if let Some(qc) = node0.qcs.get(&2) {
+        let _ = nodes[0].on_vote(vote).unwrap();
+        if let Ok(Some(qc)) = nodes[0].storage.get_qc(2) {
             qc2 = Some(qc.clone());
         }
     }
@@ -118,6 +120,6 @@ fn test_three_chain_commit() {
     println!("QC2 Formed for View {}", qc2.view);
 
     // --- VERIFY COMMIT ---
-    assert!(node0.blocks.contains_key(&b2_hash));
-    assert!(node0.qcs.contains_key(&2));
+    assert!(nodes[0].storage.get_block(&b2_hash).unwrap().is_some());
+    assert!(nodes[0].storage.get_qc(2).unwrap().is_some());
 }

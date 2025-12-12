@@ -12,10 +12,16 @@ fn test_explicit_finalization() {
         (0..4).map(|_| ockham::crypto::generate_keypair()).collect();
     let committee: Vec<PublicKey> = keys.iter().map(|k| k.0.clone()).collect();
 
-    let mut node0 = SimplexState::new(keys[0].0.clone(), keys[0].1.clone(), committee.clone());
+    let storage = Box::new(ockham::storage::MemStorage::new());
+    let mut node0 = SimplexState::new(
+        keys[0].0.clone(),
+        keys[0].1.clone(),
+        committee.clone(),
+        storage,
+    );
 
     // 2. Proposal for View 1
-    let genesis_hash = hash_data(node0.blocks.values().next().unwrap());
+    let genesis_hash = node0.preferred_block;
     let qc0 = QuorumCertificate::default();
     let b1 = Block::new(keys[0].0.clone(), 1, genesis_hash, qc0, vec![]);
 
@@ -70,7 +76,10 @@ fn test_explicit_finalization() {
     }
 
     // QC should be formed
-    assert!(node0.qcs.contains_key(&1), "QC for View 1 should be formed");
+    assert!(
+        node0.storage.get_qc(1).unwrap().is_some(),
+        "QC for View 1 should be formed"
+    );
 
     // 5. Verify Node 0 broadcasted a Finalize Vote
     assert!(

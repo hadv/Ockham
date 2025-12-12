@@ -71,7 +71,7 @@ This project is being developed in 4 phases:
 
 - [ ] **Phase 3: Cryptography and Storage**
     - [x] Replace mock crypto with `blst` (BLS12-381).
-    - [ ] `RocksDB` integration for persistence.
+    - [x] `RocksDB` integration for persistence.
     - [ ] Sync protocol.
 
 - [ ] **Phase 4: Optimization and Tooling**

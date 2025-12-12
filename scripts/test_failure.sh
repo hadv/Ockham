@@ -9,7 +9,9 @@ cleanup() {
 trap cleanup EXIT
 
 # Clean old logs
+# Clean old logs and DB
 rm -f node*.log
+rm -rf ./db
 
 echo "Building..."
 cargo build --quiet
