@@ -21,6 +21,7 @@ pub struct SimplexBehaviour {
 pub enum NetworkEvent {
     VoteReceived(Vote),
     BlockReceived(Block),
+    SyncMessageReceived(crate::types::SyncMessage, String), // Message + PeerId
     PeerConnected(String),
 }
 
@@ -29,6 +30,7 @@ pub enum NetworkEvent {
 enum NetworkCommand {
     Broadcastblock(Block),
     BroadcastVote(Vote),
+    BroadcastSync(crate::types::SyncMessage),
     Dial(Multiaddr),
 }
 
@@ -126,6 +128,9 @@ impl Network {
                                  let _ = event_sender.send(NetworkEvent::BlockReceived(block)).await;
                              } else if let Ok(vote) = serde_json::from_slice::<Vote>(&message.data) {
                                  let _ = event_sender.send(NetworkEvent::VoteReceived(vote)).await;
+                             } else if let Ok(sync_msg) = serde_json::from_slice::<crate::types::SyncMessage>(&message.data) {
+                                let peer_id = message.source.map(|p| p.to_string()).unwrap_or_default();
+                                let _ = event_sender.send(NetworkEvent::SyncMessageReceived(sync_msg, peer_id)).await;
                              }
                         },
                         _ => {}
@@ -141,16 +146,26 @@ impl Network {
                                 }
                              }
                         },
-                        Some(NetworkCommand::BroadcastVote(vote)) => {
-                             let data = serde_json::to_vec(&vote).unwrap();
-                             let topic = gossipsub::IdentTopic::new("simplex-consensus");
-                             if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic, data) {
-                                match e {
-                                    gossipsub::PublishError::Duplicate => {},
-                                    _ => println!("Publish error: {e:?}"),
-                                }
-                             }
-                        },
+                         Some(NetworkCommand::BroadcastVote(vote)) => {
+                              let data = serde_json::to_vec(&vote).unwrap();
+                              let topic = gossipsub::IdentTopic::new("simplex-consensus");
+                              if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic, data) {
+                                 match e {
+                                     gossipsub::PublishError::Duplicate => {},
+                                     _ => println!("Publish error: {e:?}"),
+                                 }
+                              }
+                         },
+                         Some(NetworkCommand::BroadcastSync(msg)) => {
+                              let data = serde_json::to_vec(&msg).unwrap();
+                              let topic = gossipsub::IdentTopic::new("simplex-consensus");
+                              if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic, data) {
+                                 match e {
+                                     gossipsub::PublishError::Duplicate => {},
+                                     _ => println!("Publish error: {e:?}"),
+                                 }
+                              }
+                         },
                         Some(NetworkCommand::Dial(addr)) => {
                              if let Err(e) = swarm.dial(addr) {
                                 println!("Dial error: {e:?}");
@@ -188,6 +203,13 @@ impl Network {
         let _ = self
             .command_sender
             .send(NetworkCommand::BroadcastVote(vote))
+            .await;
+    }
+
+    pub async fn broadcast_sync(&self, msg: crate::types::SyncMessage) {
+        let _ = self
+            .command_sender
+            .send(NetworkCommand::BroadcastSync(msg))
             .await;
     }
 

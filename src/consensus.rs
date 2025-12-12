@@ -22,7 +22,10 @@ pub enum ConsensusError {
 pub enum ConsensusAction {
     BroadcastVote(Vote),
     BroadcastBlock(Block),
-    // In a real implementation, we'd have Timer start/stop actions here
+    // Sync Actions
+    BroadcastRequest(Hash),
+    SendBlock(Block, String), // Respond to a specific peer (String is PeerId)
+                              // In a real implementation, we'd have Timer start/stop actions here
 }
 
 pub struct SimplexState {
@@ -42,6 +45,10 @@ pub struct SimplexState {
     pub votes_received: HashMap<View, HashMap<PublicKey, Vote>>,
     // Track Finalize votes separately for easier counting
     pub finalize_votes_received: HashMap<View, HashMap<PublicKey, Vote>>,
+
+    // Sync: Orphan Buffer
+    // Map: ParentHash -> List of Orphan Blocks waiting for that parent
+    pub orphans: HashMap<Hash, Vec<Block>>,
 }
 
 impl SimplexState {
@@ -70,6 +77,7 @@ impl SimplexState {
                 storage,
                 votes_received: HashMap::new(),
                 finalize_votes_received: HashMap::new(),
+                orphans: HashMap::new(),
             };
         }
 
@@ -110,6 +118,7 @@ impl SimplexState {
             storage,
             votes_received: HashMap::new(),
             finalize_votes_received: HashMap::new(),
+            orphans: HashMap::new(),
         }
     }
 
@@ -158,7 +167,17 @@ impl SimplexState {
                 .unwrap()
                 .is_none()
         {
-            return Err(ConsensusError::InvalidParent);
+            // Orphan Logic: Buffer and Request Parent
+            log::info!(
+                "Received Orphan Block View {}. Parent {:?} missing. Buffering and Requesting...",
+                block.view,
+                block.parent_hash
+            );
+            self.orphans
+                .entry(block.parent_hash)
+                .or_default()
+                .push(block.clone());
+            return Ok(vec![ConsensusAction::BroadcastRequest(block.parent_hash)]);
         }
 
         // 3. Verify QC
@@ -369,5 +388,49 @@ impl SimplexState {
         if let Err(e) = self.storage.save_consensus_state(&state) {
             log::error!("Failed to persist state: {:?}", e);
         }
+    }
+
+    /// Handle a Block Request from a peer.
+    pub fn on_block_request(
+        &self,
+        block_hash: Hash,
+        peer_id: String,
+    ) -> Result<Vec<ConsensusAction>, ConsensusError> {
+        if let Ok(Some(block)) = self.storage.get_block(&block_hash) {
+            log::info!("Serving Block Request for {:?}", block_hash);
+            return Ok(vec![ConsensusAction::SendBlock(block, peer_id)]);
+        }
+        Ok(vec![])
+    }
+
+    /// Handle a Block Response (Synced Block).
+    pub fn on_block_response(
+        &mut self,
+        block: Block,
+    ) -> Result<Vec<ConsensusAction>, ConsensusError> {
+        log::info!("Received Synced Block View {}", block.view);
+        // Process the block as if it was a proposal
+        // Note: This might trigger votes for old blocks, which is fine (Simplex handles it)
+        // or we might want to suppress voting if it's too old?
+        // For now, let's just process it to update state/storage.
+        let mut actions = self.on_proposal(block.clone())?;
+
+        // Check if this block fills any gaps (is a parent for orphans)
+        let block_hash = hash_data(&block);
+        if let Some(orphans) = self.orphans.remove(&block_hash) {
+            log::info!(
+                "Processed Orphan Parent. Re-processing {} orphans...",
+                orphans.len()
+            );
+            for orphan in orphans {
+                // Recursively process orphans
+                // Note: BFS/DFS might be needed if deep chain, but simple linear recursion is okay for prototype
+                if let Ok(orphan_actions) = self.on_block_response(orphan) {
+                    actions.extend(orphan_actions);
+                }
+            }
+        }
+
+        Ok(actions)
     }
 }
