@@ -9,15 +9,15 @@ fn test_explicit_finalization() {
 
     // 1. Setup Committee (4 nodes) -> f=1, threshold=3
     let keys: Vec<(PublicKey, PrivateKey)> =
-        (0..4).map(|i| (PublicKey(i), PrivateKey(i))).collect();
-    let committee: Vec<PublicKey> = keys.iter().map(|k| k.0).collect();
+        (0..4).map(|_| ockham::crypto::generate_keypair()).collect();
+    let committee: Vec<PublicKey> = keys.iter().map(|k| k.0.clone()).collect();
 
-    let mut node0 = SimplexState::new(keys[0].0, keys[0].1, committee.clone());
+    let mut node0 = SimplexState::new(keys[0].0.clone(), keys[0].1.clone(), committee.clone());
 
     // 2. Proposal for View 1
     let genesis_hash = hash_data(node0.blocks.values().next().unwrap());
     let qc0 = QuorumCertificate::default();
-    let b1 = Block::new(keys[0].0, 1, genesis_hash, qc0, vec![]);
+    let b1 = Block::new(keys[0].0.clone(), 1, genesis_hash, qc0, vec![]);
 
     // 3. Node 0 receives Block 1 -> Should Vote (Notarize)
     let actions = node0.on_proposal(b1.clone()).unwrap();
@@ -48,7 +48,7 @@ fn test_explicit_finalization() {
                 view: 1,
                 block_hash: b1_hash,
                 vote_type: VoteType::Notarize,
-                author: *pk,
+                author: pk.clone(),
                 signature: sig,
             }
         })
@@ -91,7 +91,7 @@ fn test_explicit_finalization() {
             view: 1,
             block_hash: b1_hash,
             vote_type: VoteType::Finalize,
-            author: *pk,
+            author: pk.clone(),
             signature: sig,
         };
         let _ = node0.on_vote(fvote);

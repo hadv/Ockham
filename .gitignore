@@ -1,6 +1,4 @@
 /target
 **/*.rs.bk
 node*.log
-*.md
-!README.md
 discussion.json

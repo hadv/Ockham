@@ -70,9 +70,9 @@ This project is being developed in 4 phases:
     - Network-based consensus tests.
 
 - [ ] **Phase 3: Cryptography and Storage**
-    - Replace mock crypto with `blst` (BLS12-381).
-    - `RocksDB` integration for persistence.
-    - Sync protocol.
+    - [x] Replace mock crypto with `blst` (BLS12-381).
+    - [ ] `RocksDB` integration for persistence.
+    - [ ] Sync protocol.
 
 - [ ] **Phase 4: Optimization and Tooling**
     - Signature Aggregation.

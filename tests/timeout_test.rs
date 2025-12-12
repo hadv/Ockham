@@ -6,17 +6,17 @@ use ockham::types::{Block, QuorumCertificate, Vote};
 fn test_timeout_chain_extension() {
     // 1. Setup Committee (1 node for simplicity of leadership)
     let keys: Vec<(PublicKey, PrivateKey)> =
-        (0..1).map(|i| (PublicKey(i), PrivateKey(i))).collect();
-    let committee: Vec<PublicKey> = keys.iter().map(|k| k.0).collect();
+        (0..1).map(|_| ockham::crypto::generate_keypair()).collect();
+    let committee: Vec<PublicKey> = keys.iter().map(|k| k.0.clone()).collect();
 
     // Node 0
-    let mut node0 = SimplexState::new(keys[0].0, keys[0].1, committee.clone());
+    let mut node0 = SimplexState::new(keys[0].0.clone(), keys[0].1.clone(), committee.clone());
     let genesis_block_hash = hash_data(node0.blocks.values().next().unwrap());
 
     // --- VIEW 1 (Normal) ---
     // Create Block 1
     let qc0 = QuorumCertificate::default();
-    let b1 = Block::new(keys[0].0, 1, genesis_block_hash, qc0, vec![1]);
+    let b1 = Block::new(keys[0].0.clone(), 1, genesis_block_hash, qc0, vec![1]);
     let b1_hash = hash_data(&b1);
 
     // Node 0 processes B1
@@ -27,7 +27,7 @@ fn test_timeout_chain_extension() {
         view: 1,
         block_hash: b1_hash,
         vote_type: ockham::types::VoteType::Notarize,
-        author: keys[0].0,
+        author: keys[0].0.clone(),
         signature: sign(&keys[0].1, &b1_hash.0),
     };
     node0.on_vote(v1).unwrap();
@@ -45,7 +45,7 @@ fn test_timeout_chain_extension() {
         view: 2,
         block_hash: dummy_hash,
         vote_type: ockham::types::VoteType::Notarize,
-        author: keys[0].0,
+        author: keys[0].0.clone(),
         signature: sign(&keys[0].1, &dummy_hash.0),
     };
     node0.on_vote(v2).unwrap();

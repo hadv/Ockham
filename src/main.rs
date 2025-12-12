@@ -15,13 +15,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(1)
         .expect("Usage: cargo run -- <node_id>")
         .parse::<u64>()?;
-    let my_id = PublicKey(id_arg);
-    let my_key = PrivateKey(id_arg);
+    let (my_id, my_key) = ockham::crypto::generate_keypair_from_id(id_arg);
 
     log::info!("Starting Node {}", id_arg);
 
     // 2. Setup Committee (Fixed 5 nodes for milestone)
-    let committee: Vec<PublicKey> = (0..5).map(PublicKey).collect();
+    let committee: Vec<PublicKey> = (0..5)
+        .map(|i| ockham::crypto::generate_keypair_from_id(i).0)
+        .collect();
 
     // 3. Initialize Network
     // Node 0 Listen on 9000, others random (0)

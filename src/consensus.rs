@@ -49,7 +49,7 @@ impl SimplexState {
         // Create Genesis Block
         let genesis_qc = QuorumCertificate::default();
         let genesis_block =
-            Block::new(PublicKey(0), 0, Hash::default(), genesis_qc.clone(), vec![]);
+            Block::new(crate::crypto::generate_keypair_from_id(0).0, 0, Hash::default(), genesis_qc.clone(), vec![]);
         let genesis_hash = hash_data(&genesis_block);
 
         let mut blocks = HashMap::new();
@@ -170,7 +170,7 @@ impl SimplexState {
         }
 
         let view_votes = self.votes_received.entry(vote.view).or_default();
-        view_votes.insert(vote.author, vote.clone());
+        view_votes.insert(vote.author.clone(), vote.clone());
 
         let threshold = (self.committee.len() * 2) / 3 + 1;
 
@@ -181,7 +181,7 @@ impl SimplexState {
         for v in view_votes.values() {
             if v.block_hash == vote.block_hash {
                 count_for_block += 1;
-                signatures.push((v.author, v.signature.clone()));
+                signatures.push((v.author.clone(), v.signature.clone()));
             }
         }
 
@@ -252,7 +252,7 @@ impl SimplexState {
             view,
             block_hash,
             vote_type,
-            author: self.my_id,
+            author: self.my_id.clone(),
             signature,
         }
     }
@@ -269,7 +269,7 @@ impl SimplexState {
         parent: Hash,
     ) -> Result<Block, ConsensusError> {
         let block = Block::new(
-            self.my_id,
+            self.my_id.clone(),
             view,
             parent, // Parent of new block is the block certified by QC
             qc,
@@ -281,7 +281,7 @@ impl SimplexState {
     // try_finalize removed in favor of on_finalize_vote
     fn on_finalize_vote(&mut self, vote: Vote) -> Result<Vec<ConsensusAction>, ConsensusError> {
         let view_votes = self.finalize_votes_received.entry(vote.view).or_default();
-        view_votes.insert(vote.author, vote.clone());
+        view_votes.insert(vote.author.clone(), vote.clone());
 
         let threshold = (self.committee.len() * 2) / 3 + 1;
         if view_votes.len() >= threshold {

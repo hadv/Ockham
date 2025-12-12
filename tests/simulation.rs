@@ -6,17 +6,17 @@ use ockham::types::{Block, QuorumCertificate};
 fn test_three_chain_commit() {
     // 1. Setup Committee (4 nodes)
     let keys: Vec<(PublicKey, PrivateKey)> =
-        (0..4).map(|i| (PublicKey(i), PrivateKey(i))).collect();
-    let committee: Vec<PublicKey> = keys.iter().map(|k| k.0).collect();
+        (0..4).map(|_| ockham::crypto::generate_keypair()).collect();
+    let committee: Vec<PublicKey> = keys.iter().map(|k| k.0.clone()).collect();
 
     // Instantiate State for Node 0 (Leader 1)
-    let mut node0 = SimplexState::new(keys[0].0, keys[0].1, committee.clone());
+    let mut node0 = SimplexState::new(keys[0].0.clone(), keys[0].1.clone(), committee.clone());
 
     // Instantiate State for Node 1, 2, 3
     let mut other_nodes: Vec<SimplexState> = keys
         .iter()
         .skip(1)
-        .map(|(pk, sk)| SimplexState::new(*pk, *sk, committee.clone()))
+        .map(|(pk, sk)| SimplexState::new(pk.clone(), sk.clone(), committee.clone()))
         .collect();
 
     println!("Genesis: {:?}", node0.blocks.keys());
@@ -25,7 +25,7 @@ fn test_three_chain_commit() {
     // Leader 0 creates Block 1 (parent = Genesis)
     let genesis_hash = hash_data(node0.blocks.values().next().unwrap());
     let qc0 = QuorumCertificate::default(); // genesis QC
-    let b1 = Block::new(keys[0].0, 1, genesis_hash, qc0, vec![1, 2, 3]);
+    let b1 = Block::new(keys[0].0.clone(), 1, genesis_hash, qc0, vec![1, 2, 3]);
     let b1_hash = hash_data(&b1);
 
     println!("Block 1 Hash: {:?}", b1_hash);
@@ -85,7 +85,7 @@ fn test_three_chain_commit() {
     other_nodes[0].blocks.insert(b1_hash, b1.clone());
 
     // Node 1 proposes b2
-    let b2 = Block::new(keys[1].0, 2, b1_hash, qc1.clone(), vec![4, 5, 6]);
+    let b2 = Block::new(keys[1].0.clone(), 2, b1_hash, qc1.clone(), vec![4, 5, 6]);
     let b2_hash = hash_data(&b2);
 
     // All nodes vote for b2
