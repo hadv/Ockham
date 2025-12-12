@@ -1,6 +1,4 @@
-use blst::min_sig::{
-    PublicKey as BlstPublicKey, SecretKey, Signature as BlstSignature,
-};
+use blst::min_sig::{PublicKey as BlstPublicKey, SecretKey, Signature as BlstSignature};
 use rand::RngCore;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
