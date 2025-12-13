@@ -1,4 +1,4 @@
-use blst::min_sig::{PublicKey as BlstPublicKey, SecretKey, Signature as BlstSignature};
+use blst::min_sig::{AggregateSignature, PublicKey as BlstPublicKey, SecretKey, Signature as BlstSignature};
 use rand::RngCore;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
@@ -224,6 +224,29 @@ pub fn vrf_verify(pub_key: &PublicKey, seed: &[u8], proof: &VRFProof) -> bool {
     verify(pub_key, seed, &proof.0)
 }
 
+/// Aggregates multiple signatures into a single signature.
+pub fn aggregate(signatures: &[Signature]) -> Option<Signature> {
+    if signatures.is_empty() {
+        return None;
+    }
+    let sig_refs: Vec<&BlstSignature> = signatures.iter().map(|s| &s.0).collect();
+    match AggregateSignature::aggregate(&sig_refs, true) {
+        Ok(agg) => Some(Signature(agg.to_signature())),
+        Err(_) => None,
+    }
+}
+
+/// Verifies an aggregated signature against a list of public keys for a single message.
+/// This uses FastAggregateVerify optimization (all signers signed the same message).
+pub fn verify_aggregate(pub_keys: &[PublicKey], message: &[u8], signature: &Signature) -> bool {
+    if pub_keys.is_empty() {
+        return false;
+    }
+    let pk_refs: Vec<&BlstPublicKey> = pub_keys.iter().map(|pk| &pk.0).collect();
+    let err = signature.0.fast_aggregate_verify(true, message, DST, &pk_refs);
+    err == blst::BLST_ERROR::BLST_SUCCESS
+}
+
 /// Generate a KeyPair from a u64 ID (deterministic).
 /// Useful for static committees where keys are derived from IDs.
 pub fn generate_keypair_from_id(id: u64) -> (PublicKey, PrivateKey) {
@@ -259,5 +282,34 @@ mod tests {
 
         // Check verification failure with wrong seed
         assert!(!vrf_verify(&pk, b"wrong_seed", &proof));
+    }
+
+    #[test]
+    fn test_aggregation() {
+        let message = b"consensus_vote";
+        let mut sigs = Vec::new();
+        let mut pub_keys = Vec::new();
+
+        // 1. Generate 3 keypairs and sign the same message
+        for _ in 0..3 {
+            let (pk, sk) = generate_keypair();
+            let sig = sign(&sk, message);
+            sigs.push(sig);
+            pub_keys.push(pk);
+        }
+
+        // 2. Aggregate
+        let agg_sig = aggregate(&sigs).expect("Aggregation failed");
+
+        // 3. Verify
+        assert!(verify_aggregate(&pub_keys, message, &agg_sig), "Aggregate verification failed");
+
+        // 4. Negative test: wrong message
+        assert!(!verify_aggregate(&pub_keys, b"wrong_msg", &agg_sig), "Verified wrong message");
+
+        // 5. Negative test: missing public key
+        let mut partial_pks = pub_keys.clone();
+        partial_pks.pop();
+        assert!(!verify_aggregate(&partial_pks, message, &agg_sig), "Verified with missing pubkey");
     }
 }
