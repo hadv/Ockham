@@ -16,7 +16,7 @@ fn test_sync_orphan_processing() {
     let committee = vec![alice_pk.clone(), bob_pk.clone()];
 
     // Initialize Bob (Sync Node)
-    let storage = Box::new(MemStorage::new());
+    let storage = std::sync::Arc::new(MemStorage::new());
     let mut bob = SimplexState::new(bob_pk, bob_sk, committee, storage);
 
     // Create a chain of blocks (Geneis -> B1 -> B2 -> B3)
@@ -108,7 +108,7 @@ fn test_sync_block_serving() {
     let committee = vec![alice_pk.clone()];
 
     // Initialize Alice
-    let storage = Box::new(MemStorage::new());
+    let storage = std::sync::Arc::new(MemStorage::new());
     let alice = SimplexState::new(alice_pk.clone(), alice_sk, committee, storage);
 
     // Create a block and save it

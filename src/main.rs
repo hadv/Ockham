@@ -1,7 +1,10 @@
+use jsonrpsee::server::Server;
 use ockham::consensus::{ConsensusAction, SimplexState};
 use ockham::crypto::PublicKey;
 use ockham::network::{Network, NetworkEvent};
+use ockham::rpc::{OckhamRpcImpl, OckhamRpcServer};
 use std::env;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
 
@@ -22,10 +25,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     let db_path = format!("./db/node_{}", id_arg);
-    let storage =
-        Box::new(ockham::storage::RedbStorage::new(db_path).expect("Failed to create DB"));
+    let storage: Arc<dyn ockham::storage::Storage> =
+        Arc::new(ockham::storage::RedbStorage::new(db_path).expect("Failed to create DB"));
 
-    let mut state = SimplexState::new(my_id, my_key, committee, storage);
+    let mut state = SimplexState::new(my_id, my_key, committee, storage.clone());
+
+    // Start RPC Server
+    let rpc_port = 8545 + id_arg as u16; // 8545, 8546, ...
+    let addr = format!("127.0.0.1:{}", rpc_port);
+    let server = Server::builder().build(addr).await?;
+    let rpc_impl = OckhamRpcImpl::new(storage.clone());
+    let handle = server.start(rpc_impl.into_rpc());
+    log::info!("RPC Server started on port {}", rpc_port);
 
     log::info!("Starting Node {}", id_arg);
 
@@ -200,6 +211,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                      Err(e) => log::error!("Timeout Error: {:?}", e),
                 }
             }
+
+            // C. Shutdown Signal
+            _ = tokio::signal::ctrl_c() => {
+                log::info!("Shutdown signal received. Stopping RPC server...");
+                let _ = handle.stop();
+                handle.stopped().await;
+                log::info!("RPC server stopped.");
+                log::info!("Shutting down Node {}...", id_arg);
+                break;
+            }
         }
     }
+
+    // Explicitly drop state/storage to ensure DB closes cleanly (though RAII does this)
+    drop(state);
+    log::info!("Node {} shutdown complete.", id_arg);
+    Ok(())
 }

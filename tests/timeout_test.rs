@@ -10,7 +10,7 @@ fn test_timeout_chain_extension() {
     let committee: Vec<PublicKey> = keys.iter().map(|k| k.0.clone()).collect();
 
     // Node 0
-    let storage = Box::new(ockham::storage::MemStorage::new());
+    let storage = std::sync::Arc::new(ockham::storage::MemStorage::new());
     let mut node0 = SimplexState::new(
         keys[0].0.clone(),
         keys[0].1.clone(),

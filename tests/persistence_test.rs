@@ -25,7 +25,7 @@ fn test_redb_persistence() {
     // 2. Start Node A (Fresh)
     {
         println!("--- Run 1: Init Genesis ---");
-        let storage = Box::new(RedbStorage::new(db_path).unwrap());
+        let storage = std::sync::Arc::new(RedbStorage::new(db_path).unwrap());
         let state = SimplexState::new(pk.clone(), sk.clone(), committee.clone(), storage);
 
         assert_eq!(state.current_view, 1);
@@ -36,7 +36,7 @@ fn test_redb_persistence() {
     // 3. Restart Node A (Load Persistence)
     {
         println!("--- Run 2: Restart & Load ---");
-        let storage = Box::new(RedbStorage::new(db_path).unwrap());
+        let storage = std::sync::Arc::new(RedbStorage::new(db_path).unwrap());
         // Use same key/committee (irrelevant for loading state, but needed for struct)
         let state = SimplexState::new(pk.clone(), sk.clone(), committee.clone(), storage);
 
