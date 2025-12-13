@@ -1,4 +1,6 @@
-use blst::min_sig::{AggregateSignature, PublicKey as BlstPublicKey, SecretKey, Signature as BlstSignature};
+use blst::min_sig::{
+    AggregateSignature, PublicKey as BlstPublicKey, SecretKey, Signature as BlstSignature,
+};
 use rand::RngCore;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
@@ -243,7 +245,9 @@ pub fn verify_aggregate(pub_keys: &[PublicKey], message: &[u8], signature: &Sign
         return false;
     }
     let pk_refs: Vec<&BlstPublicKey> = pub_keys.iter().map(|pk| &pk.0).collect();
-    let err = signature.0.fast_aggregate_verify(true, message, DST, &pk_refs);
+    let err = signature
+        .0
+        .fast_aggregate_verify(true, message, DST, &pk_refs);
     err == blst::BLST_ERROR::BLST_SUCCESS
 }
 
@@ -302,14 +306,23 @@ mod tests {
         let agg_sig = aggregate(&sigs).expect("Aggregation failed");
 
         // 3. Verify
-        assert!(verify_aggregate(&pub_keys, message, &agg_sig), "Aggregate verification failed");
+        assert!(
+            verify_aggregate(&pub_keys, message, &agg_sig),
+            "Aggregate verification failed"
+        );
 
         // 4. Negative test: wrong message
-        assert!(!verify_aggregate(&pub_keys, b"wrong_msg", &agg_sig), "Verified wrong message");
+        assert!(
+            !verify_aggregate(&pub_keys, b"wrong_msg", &agg_sig),
+            "Verified wrong message"
+        );
 
         // 5. Negative test: missing public key
         let mut partial_pks = pub_keys.clone();
         partial_pks.pop();
-        assert!(!verify_aggregate(&partial_pks, message, &agg_sig), "Verified with missing pubkey");
+        assert!(
+            !verify_aggregate(&partial_pks, message, &agg_sig),
+            "Verified with missing pubkey"
+        );
     }
 }

@@ -11,7 +11,7 @@ fn create_block(author_id: u64, view: u64, parent_hash: Hash, justify: QuorumCer
 
 #[test]
 fn test_sync_orphan_processing() {
-    let (alice_pk, _) = generate_keypair_from_id(0);
+    let (alice_pk, alice_sk) = generate_keypair_from_id(0);
     let (bob_pk, bob_sk) = generate_keypair_from_id(1);
     let committee = vec![alice_pk.clone(), bob_pk.clone()];
 
@@ -26,22 +26,27 @@ fn test_sync_orphan_processing() {
     // Block 1 (View 1)
     let b1 = create_block(0, 1, genesis_hash, genesis_qc.clone());
     let b1_hash = hash_data(&b1);
-    // Assume QC for B1 exists (simplification: we just need a valid QC for the next block)
-    // For this test, valid QCs are not strictly checked unless we call on_proposal fully.
-    // SimplexState::on_proposal calls verify_qc, which checks simple things.
+
+    // Create valid QC for B1
+    let sig1 = ockham::crypto::sign(&alice_sk, &b1_hash.0);
     let qc1 = QuorumCertificate {
         view: 1,
         block_hash: b1_hash,
-        signatures: vec![],
+        signature: sig1,
+        signers: vec![alice_pk.clone()],
     };
 
     // Block 2 (View 2)
     let b2 = create_block(0, 2, b1_hash, qc1.clone());
     let b2_hash = hash_data(&b2);
+
+    // Create valid QC for B2
+    let sig2 = ockham::crypto::sign(&alice_sk, &b2_hash.0);
     let qc2 = QuorumCertificate {
         view: 2,
         block_hash: b2_hash,
-        signatures: vec![],
+        signature: sig2,
+        signers: vec![alice_pk.clone()],
     };
 
     // Block 3 (View 3)

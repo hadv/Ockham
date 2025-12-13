@@ -73,7 +73,8 @@ pub struct Vote {
 pub struct QuorumCertificate {
     pub view: View,
     pub block_hash: Hash,
-    pub signatures: Vec<(PublicKey, Signature)>, // In real impl, this would be an aggregated sig + bitfield
+    pub signature: Signature,    // Aggregated signature
+    pub signers: Vec<PublicKey>, // Public keys of signers
 }
 
 /// Messages used for Block Synchronization

@@ -1,4 +1,6 @@
-use crate::crypto::{Hash, PrivateKey, PublicKey, hash_data, sign, verify};
+use crate::crypto::{
+    Hash, PrivateKey, PublicKey, aggregate, hash_data, sign, verify, verify_aggregate,
+};
 use crate::storage::{ConsensusState, Storage};
 use crate::types::{Block, QuorumCertificate, View, Vote, VoteType};
 use std::collections::HashMap;
@@ -245,21 +247,28 @@ impl SimplexState {
 
         let mut count_for_block = 0;
         let mut signatures = Vec::new();
+        let mut signers = Vec::new();
 
         // Simple aggregation: check how many votes for this specific block_hash
         for v in view_votes.values() {
             if v.block_hash == vote.block_hash {
                 count_for_block += 1;
-                signatures.push((v.author.clone(), v.signature.clone()));
+                signatures.push(v.signature.clone());
+                signers.push(v.author.clone());
             }
         }
 
         if count_for_block >= threshold {
             // QC Formed!
+            // In a real system we'd handle failure better, but here we expect strictly valid signatures
+            let aggregated_signature =
+                aggregate(&signatures).expect("Failed to aggregate signatures");
+
             let qc = QuorumCertificate {
                 view: vote.view,
                 block_hash: vote.block_hash,
-                signatures,
+                signature: aggregated_signature,
+                signers,
             };
 
             // Check if we haven't already processed this QC to avoid dupes?
@@ -369,6 +378,9 @@ impl SimplexState {
     fn verify_qc(&self, qc: &QuorumCertificate) -> Result<(), ConsensusError> {
         if qc.view == 0 {
             return Ok(());
+        }
+        if !verify_aggregate(&qc.signers, &qc.block_hash.0, &qc.signature) {
+            return Err(ConsensusError::InvalidQC);
         }
         Ok(())
     }
