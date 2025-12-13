@@ -223,7 +223,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    
+
     // Explicitly drop state/storage to ensure DB closes cleanly (though RAII does this)
     drop(state);
     log::info!("Node {} shutdown complete.", id_arg);
