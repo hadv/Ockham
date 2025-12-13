@@ -40,7 +40,7 @@ pub struct SimplexState {
     pub preferred_view: View,
 
     // Storage (Abstracted)
-    pub storage: Box<dyn Storage>,
+    pub storage: std::sync::Arc<dyn Storage>,
 
     // Vote Aggregation
     // Vote Aggregation (split by type roughly, or just filter)
@@ -58,7 +58,7 @@ impl SimplexState {
         my_id: PublicKey,
         my_key: PrivateKey,
         committee: Vec<PublicKey>,
-        storage: Box<dyn Storage>,
+        storage: std::sync::Arc<dyn Storage>,
     ) -> Self {
         // Attempt to load existing state
         if let Ok(Some(saved_state)) = storage.get_consensus_state() {

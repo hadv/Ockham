@@ -4,6 +4,9 @@ use ockham::network::{Network, NetworkEvent};
 use std::env;
 use std::time::Duration;
 use tokio::time;
+use ockham::rpc::{OckhamRpcServer, OckhamRpcImpl};
+use std::sync::Arc;
+use jsonrpsee::server::Server;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -22,10 +25,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     let db_path = format!("./db/node_{}", id_arg);
-    let storage =
-        Box::new(ockham::storage::RedbStorage::new(db_path).expect("Failed to create DB"));
+    let storage: Arc<dyn ockham::storage::Storage> =
+        Arc::new(ockham::storage::RedbStorage::new(db_path).expect("Failed to create DB"));
 
-    let mut state = SimplexState::new(my_id, my_key, committee, storage);
+    let mut state = SimplexState::new(my_id, my_key, committee, storage.clone());
+
+    // Start RPC Server
+    let rpc_port = 8545 + id_arg as u16; // 8545, 8546, ...
+    let addr = format!("127.0.0.1:{}", rpc_port);
+    let server = Server::builder().build(addr).await?;
+    let rpc_impl = OckhamRpcImpl::new(storage.clone());
+    let handle = server.start(rpc_impl.into_rpc());
+    log::info!("RPC Server started on port {}", rpc_port);
 
     log::info!("Starting Node {}", id_arg);
 

@@ -12,7 +12,7 @@ fn test_three_chain_commit() {
     // Instantiate State for Node 0 (Leader 1)
     let mut nodes: Vec<SimplexState> = (0..4)
         .map(|i| {
-            let storage = Box::new(ockham::storage::MemStorage::new());
+            let storage = std::sync::Arc::new(ockham::storage::MemStorage::new());
             SimplexState::new(
                 keys[i].0.clone(),
                 keys[i].1.clone(),

@@ -12,7 +12,7 @@ fn test_explicit_finalization() {
         (0..4).map(|_| ockham::crypto::generate_keypair()).collect();
     let committee: Vec<PublicKey> = keys.iter().map(|k| k.0.clone()).collect();
 
-    let storage = Box::new(ockham::storage::MemStorage::new());
+    let storage = std::sync::Arc::new(ockham::storage::MemStorage::new());
     let mut node0 = SimplexState::new(
         keys[0].0.clone(),
         keys[0].1.clone(),
