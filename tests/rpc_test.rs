@@ -16,7 +16,8 @@ async fn test_rpc_get_status() {
     };
     storage.save_consensus_state(&state).unwrap();
 
-    let rpc = OckhamRpcImpl::new(storage);
+    let tx_pool = Arc::new(ockham::tx_pool::TxPool::new());
+    let rpc = OckhamRpcImpl::new(storage, tx_pool);
 
     // Call RPC
     let result = rpc.get_status();
@@ -35,7 +36,7 @@ async fn test_rpc_get_block() {
     // Create a dummy block
     let (pk, _) = ockham::crypto::generate_keypair();
     let qc = QuorumCertificate::default();
-    let block = Block::new(pk, 1, ockham::crypto::Hash::default(), qc, vec![]);
+    let block = Block::new(pk, 1, ockham::crypto::Hash::default(), qc, ockham::crypto::Hash::default(), ockham::crypto::Hash::default(), vec![]);
     let block_hash = ockham::crypto::hash_data(&block);
 
     storage.save_block(&block).unwrap();
@@ -49,7 +50,8 @@ async fn test_rpc_get_block() {
     };
     storage.save_consensus_state(&state).unwrap();
 
-    let rpc = OckhamRpcImpl::new(storage);
+    let tx_pool = Arc::new(ockham::tx_pool::TxPool::new());
+    let rpc = OckhamRpcImpl::new(storage, tx_pool);
 
     // 1. get_block_by_hash
     let res = rpc.get_block_by_hash(block_hash);
