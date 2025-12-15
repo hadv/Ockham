@@ -127,46 +127,44 @@ impl OckhamRpcServer for OckhamRpcImpl {
             )
         })?;
 
-        if let Some(s) = state {
-            if let Ok(Some(block)) = self.storage.get_block(&s.preferred_block) {
-                // Return next suggested base fee
-                // Note: We need access to calculation logic.
-                // Currently it's private in SimpleState.
-                // We should expose it or duplicate it?
-                // Ideally move to types or a shared module.
-                // For MVP: Duplicate logic or simple calculation.
-                // Easiest is to move calculate_next_base_fee to Block or types.
-                // Let's implement duplicates for now but properly I should move it.
-                // Or better: ConsensusState stores `current_param`? No.
-                // Let's compute it.
+        let Some(s) = state else {
+            return Ok(U256::from(crate::types::INITIAL_BASE_FEE));
+        };
 
-                // Logic mirror from consensus.rs
-                let elasticity_multiplier = 2;
-                let base_fee_max_change_denominator = 8;
-                let target_gas = crate::types::BLOCK_GAS_LIMIT / elasticity_multiplier;
-
-                let parent_gas_used = block.gas_used;
-                let parent_base_fee = block.base_fee_per_gas;
-
-                if parent_gas_used == target_gas {
-                    return Ok(parent_base_fee);
-                } else if parent_gas_used > target_gas {
-                    let gas_used_delta = parent_gas_used - target_gas;
-                    let base_fee_increase = parent_base_fee * U256::from(gas_used_delta)
-                        / U256::from(target_gas)
-                        / U256::from(base_fee_max_change_denominator);
-                    return Ok(parent_base_fee + base_fee_increase);
-                } else {
-                    let gas_used_delta = target_gas - parent_gas_used;
-                    let base_fee_decrease = parent_base_fee * U256::from(gas_used_delta)
-                        / U256::from(target_gas)
-                        / U256::from(base_fee_max_change_denominator);
-                    return Ok(parent_base_fee.saturating_sub(base_fee_decrease));
-                }
+        let block = match self.storage.get_block(&s.preferred_block) {
+            Ok(Some(b)) => b,
+            Ok(None) => return Ok(U256::from(crate::types::INITIAL_BASE_FEE)),
+            Err(e) => {
+                return Err(jsonrpsee::types::ErrorObject::owned(
+                    -32000,
+                    format!("Storage error: {:?}", e),
+                    None::<()>,
+                ));
             }
-        }
+        };
 
-        // Default if unknown (Genesis default)
-        Ok(U256::from(crate::types::INITIAL_BASE_FEE))
+        // Logic mirror from consensus.rs
+        let elasticity_multiplier = 2;
+        let base_fee_max_change_denominator = 8;
+        let target_gas = crate::types::BLOCK_GAS_LIMIT / elasticity_multiplier;
+
+        let parent_gas_used = block.gas_used;
+        let parent_base_fee = block.base_fee_per_gas;
+
+        if parent_gas_used == target_gas {
+            Ok(parent_base_fee)
+        } else if parent_gas_used > target_gas {
+            let gas_used_delta = parent_gas_used - target_gas;
+            let base_fee_increase = parent_base_fee * U256::from(gas_used_delta)
+                / U256::from(target_gas)
+                / U256::from(base_fee_max_change_denominator);
+            Ok(parent_base_fee + base_fee_increase)
+        } else {
+            let gas_used_delta = target_gas - parent_gas_used;
+            let base_fee_decrease = parent_base_fee * U256::from(gas_used_delta)
+                / U256::from(target_gas)
+                / U256::from(base_fee_max_change_denominator);
+            Ok(parent_base_fee.saturating_sub(base_fee_decrease))
+        }
     }
 }
