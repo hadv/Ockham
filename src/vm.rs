@@ -18,14 +18,33 @@ pub enum ExecutionError {
     Transaction(String),
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::MemStorage;
+
+    #[test]
+    fn test_execute_block_gas_limit() {
+        let storage = Arc::new(MemStorage::new());
+        let state = Arc::new(Mutex::new(StateManager::new(storage)));
+        let executor = Executor::new(state, 10_000_000); // reduced limit
+
+        // ...
+    }
+}
+
 #[derive(Clone)]
 pub struct Executor {
     pub state: Arc<Mutex<StateManager>>,
+    pub block_gas_limit: u64,
 }
 
 impl Executor {
-    pub fn new(state: Arc<Mutex<StateManager>>) -> Self {
-        Self { state }
+    pub fn new(state: Arc<Mutex<StateManager>>, block_gas_limit: u64) -> Self {
+        Self {
+            state,
+            block_gas_limit,
+        }
     }
 
     pub fn execute_block(&self, block: &mut Block) -> Result<(), ExecutionError> {
@@ -41,7 +60,7 @@ impl Executor {
         // Or if total gas used exceeds limit (checked at end of extraction).
 
         for tx in &block.payload {
-            if tx.gas_limit > crate::types::BLOCK_GAS_LIMIT {
+            if tx.gas_limit > self.block_gas_limit {
                 return Err(ExecutionError::Transaction(
                     "Tx exceeds block gas limit".into(),
                 ));

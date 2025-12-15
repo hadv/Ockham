@@ -31,8 +31,19 @@ fn test_sync_orphan_processing() {
     let state_manager = std::sync::Arc::new(std::sync::Mutex::new(
         ockham::state::StateManager::new(storage.clone()),
     ));
-    let executor = ockham::vm::Executor::new(state_manager.clone());
-    let mut bob = SimplexState::new(bob_pk, bob_sk, committee, storage, tx_pool, executor);
+    let executor = ockham::vm::Executor::new(
+        state_manager.clone(),
+        ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
+    );
+    let mut bob = SimplexState::new(
+        bob_pk,
+        bob_sk,
+        committee,
+        storage,
+        tx_pool,
+        executor,
+        ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
+    );
 
     // Create a chain of blocks (Geneis -> B1 -> B2 -> B3)
     let genesis_hash = bob.preferred_block;
@@ -128,7 +139,10 @@ fn test_sync_block_serving() {
     let state_manager = std::sync::Arc::new(std::sync::Mutex::new(
         ockham::state::StateManager::new(storage.clone()),
     ));
-    let executor = ockham::vm::Executor::new(state_manager.clone());
+    let executor = ockham::vm::Executor::new(
+        state_manager.clone(),
+        ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
+    );
     let alice = SimplexState::new(
         alice_pk.clone(),
         alice_sk,
@@ -136,6 +150,7 @@ fn test_sync_block_serving() {
         storage,
         tx_pool,
         executor,
+        ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
     );
 
     // Create a block and save it

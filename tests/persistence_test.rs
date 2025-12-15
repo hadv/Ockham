@@ -30,7 +30,10 @@ fn test_redb_persistence() {
         let state_manager = std::sync::Arc::new(std::sync::Mutex::new(
             ockham::state::StateManager::new(storage.clone()),
         ));
-        let executor = ockham::vm::Executor::new(state_manager.clone());
+        let executor = ockham::vm::Executor::new(
+            state_manager.clone(),
+            ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
+        );
         let state = SimplexState::new(
             pk.clone(),
             sk.clone(),
@@ -38,6 +41,7 @@ fn test_redb_persistence() {
             storage,
             tx_pool,
             executor,
+            ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
         );
 
         assert_eq!(state.current_view, 1);
@@ -53,7 +57,10 @@ fn test_redb_persistence() {
         let state_manager = std::sync::Arc::new(std::sync::Mutex::new(
             ockham::state::StateManager::new(storage.clone()),
         ));
-        let executor = ockham::vm::Executor::new(state_manager.clone());
+        let executor = ockham::vm::Executor::new(
+            state_manager.clone(),
+            ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
+        );
         // Use same key/committee (irrelevant for loading state, but needed for struct)
         let state = SimplexState::new(
             pk.clone(),
@@ -62,6 +69,7 @@ fn test_redb_persistence() {
             storage,
             tx_pool,
             executor,
+            ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
         );
 
         // Should have loaded state

@@ -3,9 +3,7 @@ use crate::crypto::{
 };
 use crate::storage::{ConsensusState, Storage};
 use crate::tx_pool::TxPool;
-use crate::types::{
-    BLOCK_GAS_LIMIT, Block, INITIAL_BASE_FEE, QuorumCertificate, U256, View, Vote, VoteType,
-};
+use crate::types::{Block, INITIAL_BASE_FEE, QuorumCertificate, U256, View, Vote, VoteType};
 use crate::vm::Executor;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -45,6 +43,7 @@ pub struct SimplexState {
     pub finalized_height: View,
     pub preferred_block: Hash,
     pub preferred_view: View,
+    pub block_gas_limit: u64,
 
     // Storage (Abstracted)
     pub storage: std::sync::Arc<dyn Storage>,
@@ -72,6 +71,7 @@ impl SimplexState {
         storage: std::sync::Arc<dyn Storage>,
         tx_pool: Arc<TxPool>,
         executor: Executor,
+        block_gas_limit: u64,
     ) -> Self {
         // Attempt to load existing state
         if let Ok(Some(saved_state)) = storage.get_consensus_state() {
@@ -95,6 +95,7 @@ impl SimplexState {
                 orphans: HashMap::new(),
                 tx_pool,
                 executor,
+                block_gas_limit: crate::types::DEFAULT_BLOCK_GAS_LIMIT,
             };
         }
 
@@ -142,6 +143,7 @@ impl SimplexState {
             orphans: HashMap::new(),
             tx_pool,
             executor,
+            block_gas_limit,
         }
     }
 
@@ -435,7 +437,7 @@ impl SimplexState {
         // We need to fetch the parent block to know its gas_used and base_fee.
         // We know 'parent' hash.
         let base_fee = if let Ok(Some(parent_block)) = self.storage.get_block(&parent) {
-            Self::calculate_next_base_fee(&parent_block)
+            self.calculate_next_base_fee(&parent_block)
         } else {
             // If parent not found (shouldn't happen for valid proposal unless genesis), use default
             log::warn!(
@@ -449,7 +451,7 @@ impl SimplexState {
         // Note: get_transactions_for_block should now assume sorted by priority fee and filter by base_fee
         let payload = self
             .tx_pool
-            .get_transactions_for_block(BLOCK_GAS_LIMIT, base_fee);
+            .get_transactions_for_block(self.block_gas_limit, base_fee);
 
         // Note: We don't know gas_used yet, only at execution.
         // But Block::new requires it?
@@ -472,10 +474,10 @@ impl SimplexState {
     }
 
     /// EIP-1559 Base Fee Calculation
-    fn calculate_next_base_fee(parent: &Block) -> U256 {
+    fn calculate_next_base_fee(&self, parent: &Block) -> U256 {
         let elasticity_multiplier = 2;
         let base_fee_max_change_denominator = 8;
-        let target_gas = BLOCK_GAS_LIMIT / elasticity_multiplier;
+        let target_gas = self.block_gas_limit / elasticity_multiplier;
 
         let parent_gas_used = parent.gas_used;
         let parent_base_fee = parent.base_fee_per_gas;

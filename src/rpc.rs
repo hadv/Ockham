@@ -33,11 +33,16 @@ pub trait OckhamRpc {
 pub struct OckhamRpcImpl {
     storage: Arc<dyn Storage>,
     tx_pool: Arc<TxPool>,
+    block_gas_limit: u64,
 }
 
 impl OckhamRpcImpl {
-    pub fn new(storage: Arc<dyn Storage>, tx_pool: Arc<TxPool>) -> Self {
-        Self { storage, tx_pool }
+    pub fn new(storage: Arc<dyn Storage>, tx_pool: Arc<TxPool>, block_gas_limit: u64) -> Self {
+        Self {
+            storage,
+            tx_pool,
+            block_gas_limit,
+        }
     }
 }
 
@@ -146,7 +151,7 @@ impl OckhamRpcServer for OckhamRpcImpl {
         // Logic mirror from consensus.rs
         let elasticity_multiplier = 2;
         let base_fee_max_change_denominator = 8;
-        let target_gas = crate::types::BLOCK_GAS_LIMIT / elasticity_multiplier;
+        let target_gas = self.block_gas_limit / elasticity_multiplier;
 
         let parent_gas_used = block.gas_used;
         let parent_base_fee = block.base_fee_per_gas;

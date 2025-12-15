@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 /// The View number definition (u64).
 pub type View = u64;
 
-pub const BLOCK_GAS_LIMIT: u64 = 30_000_000;
+pub const DEFAULT_BLOCK_GAS_LIMIT: u64 = 30_000_000;
 pub const INITIAL_BASE_FEE: u64 = 10_000_000; // 0.01 Gwei
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

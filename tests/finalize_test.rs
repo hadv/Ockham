@@ -17,7 +17,10 @@ fn test_explicit_finalization() {
     let state_manager = std::sync::Arc::new(std::sync::Mutex::new(
         ockham::state::StateManager::new(storage.clone()),
     ));
-    let executor = ockham::vm::Executor::new(state_manager.clone());
+    let executor = ockham::vm::Executor::new(
+        state_manager.clone(),
+        ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
+    );
     let mut node0 = SimplexState::new(
         keys[0].0.clone(),
         keys[0].1.clone(),
@@ -25,6 +28,7 @@ fn test_explicit_finalization() {
         storage,
         tx_pool,
         executor,
+        ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
     );
 
     // 2. Proposal for View 1

@@ -15,7 +15,10 @@ fn test_timeout_chain_extension() {
     let state_manager = std::sync::Arc::new(std::sync::Mutex::new(
         ockham::state::StateManager::new(storage.clone()),
     ));
-    let executor = ockham::vm::Executor::new(state_manager.clone());
+    let executor = ockham::vm::Executor::new(
+        state_manager.clone(),
+        ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
+    );
 
     let mut node0 = SimplexState::new(
         keys[0].0.clone(),
@@ -24,6 +27,7 @@ fn test_timeout_chain_extension() {
         storage,
         tx_pool,
         executor,
+        ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
     );
     let genesis_block_hash = node0.preferred_block;
 

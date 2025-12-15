@@ -16,12 +16,22 @@ use tokio::time;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
-    // 1. Parse Node ID from args (0, 1, 2, 3)
+    // 1. Parse Node ID from args (0, 1, 2, 3) and Gas Limit
     let args: Vec<String> = env::args().collect();
     let id_arg = args
         .get(1)
-        .expect("Usage: cargo run -- <node_id>")
+        .expect("Usage: cargo run -- <node_id> [--gas-limit <value>]")
         .parse::<u64>()?;
+
+    // Parse Optional --gas-limit
+    let mut block_gas_limit = ockham::types::DEFAULT_BLOCK_GAS_LIMIT;
+    if let Some(pos) = args.iter().position(|r| r == "--gas-limit") {
+        if let Some(val) = args.get(pos + 1) {
+            block_gas_limit = val.parse::<u64>()?;
+            log::info!("Configured Block Gas Limit: {}", block_gas_limit);
+        }
+    }
+
     // 2. Initialize Consensus
     let (my_id, my_key) = ockham::crypto::generate_keypair_from_id(id_arg);
     let committee: Vec<PublicKey> = (0..5)
@@ -43,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // We already have `storage: Arc<dyn Storage>`.
     // We need to create StateManager.
     let state_manager = Arc::new(Mutex::new(StateManager::new(storage.clone())));
-    let executor = Executor::new(state_manager.clone());
+    let executor = Executor::new(state_manager.clone(), block_gas_limit);
 
     let mut state = SimplexState::new(
         my_id,
@@ -52,13 +62,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         storage.clone(),
         tx_pool.clone(),
         executor.clone(),
+        block_gas_limit,
     );
 
     // Start RPC Server
     let rpc_port = 8545 + id_arg as u16; // 8545, 8546, ...
     let addr = format!("127.0.0.1:{}", rpc_port);
     let server = Server::builder().build(addr).await?;
-    let rpc_impl = OckhamRpcImpl::new(storage.clone(), tx_pool.clone());
+    let rpc_impl = OckhamRpcImpl::new(storage.clone(), tx_pool.clone(), block_gas_limit);
     let handle = server.start(rpc_impl.into_rpc());
     log::info!("RPC Server started on port {}", rpc_port);
 
