@@ -93,8 +93,8 @@ impl SimplexState {
                 votes_received: HashMap::new(),
                 finalize_votes_received: HashMap::new(),
                 orphans: HashMap::new(),
-                tx_pool: tx_pool.clone(),
-                executor: executor.clone(), // Assuming Executor is cheaply cloneable or we wrap it. Executor holds Arc so it is.
+                tx_pool,
+                executor,
             };
         }
 
