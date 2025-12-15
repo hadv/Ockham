@@ -1,5 +1,6 @@
 use crate::crypto::Hash;
-use crate::types::{Block, QuorumCertificate, View};
+use crate::types::{Address, Block, QuorumCertificate, View};
+use alloy_primitives::{Bytes, U256};
 use redb::{Database, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -10,6 +11,12 @@ use thiserror::Error;
 const TABLE_BLOCKS: TableDefinition<&[u8; 32], Vec<u8>> = TableDefinition::new("blocks");
 const TABLE_QCS: TableDefinition<u64, Vec<u8>> = TableDefinition::new("qcs");
 const TABLE_META: TableDefinition<&str, Vec<u8>> = TableDefinition::new("meta");
+
+// New Tables for EVM State
+const TABLE_ACCOUNTS: TableDefinition<&[u8; 20], Vec<u8>> = TableDefinition::new("accounts");
+const TABLE_STORAGE: TableDefinition<&[u8], Vec<u8>> = TableDefinition::new("storage"); // Key: Address + StorageKey
+const TABLE_CODE: TableDefinition<&[u8; 32], Vec<u8>> = TableDefinition::new("code");
+const TABLE_SMT_NODES: TableDefinition<&[u8; 32], Vec<u8>> = TableDefinition::new("smt_nodes");
 
 #[derive(Error, Debug)]
 pub enum StorageError {
@@ -76,6 +83,26 @@ pub struct ConsensusState {
     pub preferred_view: View,
 }
 
+/// Account Information stored in the Global State
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AccountInfo {
+    pub nonce: u64,
+    pub balance: U256,
+    pub code_hash: Hash,     // keccak256(code)
+    pub code: Option<Bytes>, // Cache code here or just check TABLE_CODE
+}
+
+impl Default for AccountInfo {
+    fn default() -> Self {
+        Self {
+            nonce: 0,
+            balance: U256::ZERO,
+            code_hash: Hash::default(), // Should be empty hash?
+            code: None,
+        }
+    }
+}
+
 pub trait Storage: Send + Sync {
     fn save_block(&self, block: &Block) -> Result<(), StorageError>;
     fn get_block(&self, hash: &Hash) -> Result<Option<Block>, StorageError>;
@@ -85,6 +112,23 @@ pub trait Storage: Send + Sync {
 
     fn save_consensus_state(&self, state: &ConsensusState) -> Result<(), StorageError>;
     fn get_consensus_state(&self) -> Result<Option<ConsensusState>, StorageError>;
+
+    // EVM State
+    fn get_account(&self, address: &Address) -> Result<Option<AccountInfo>, StorageError>;
+    fn save_account(&self, address: &Address, info: &AccountInfo) -> Result<(), StorageError>;
+    fn get_code(&self, hash: &Hash) -> Result<Option<Bytes>, StorageError>;
+    fn save_code(&self, hash: &Hash, code: &Bytes) -> Result<(), StorageError>;
+    fn get_storage(&self, address: &Address, index: &U256) -> Result<U256, StorageError>;
+    fn save_storage(
+        &self,
+        address: &Address,
+        index: &U256,
+        value: &U256,
+    ) -> Result<(), StorageError>;
+
+    // SMT Node Storage (key is node hash, value is serialized node)
+    fn get_smt_node(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StorageError>;
+    fn save_smt_node(&self, hash: &Hash, node: &[u8]) -> Result<(), StorageError>;
 }
 
 // -----------------------------------------------------------------------------
@@ -95,6 +139,11 @@ pub struct MemStorage {
     blocks: Arc<Mutex<HashMap<Hash, Block>>>,
     qcs: Arc<Mutex<HashMap<View, QuorumCertificate>>>,
     state: Arc<Mutex<Option<ConsensusState>>>,
+    // EVM State
+    accounts: Arc<Mutex<HashMap<Address, AccountInfo>>>,
+    code: Arc<Mutex<HashMap<Hash, Bytes>>>,
+    storage: Arc<Mutex<HashMap<(Address, U256), U256>>>,
+    smt_nodes: Arc<Mutex<HashMap<Hash, Vec<u8>>>>,
 }
 
 impl MemStorage {
@@ -131,6 +180,56 @@ impl Storage for MemStorage {
     fn get_consensus_state(&self) -> Result<Option<ConsensusState>, StorageError> {
         Ok(self.state.lock().unwrap().clone())
     }
+
+    fn get_account(&self, address: &Address) -> Result<Option<AccountInfo>, StorageError> {
+        Ok(self.accounts.lock().unwrap().get(address).cloned())
+    }
+
+    fn save_account(&self, address: &Address, info: &AccountInfo) -> Result<(), StorageError> {
+        self.accounts.lock().unwrap().insert(*address, info.clone());
+        Ok(())
+    }
+
+    fn get_code(&self, hash: &Hash) -> Result<Option<Bytes>, StorageError> {
+        Ok(self.code.lock().unwrap().get(hash).cloned())
+    }
+
+    fn save_code(&self, hash: &Hash, code: &Bytes) -> Result<(), StorageError> {
+        self.code.lock().unwrap().insert(*hash, code.clone());
+        Ok(())
+    }
+
+    fn get_storage(&self, address: &Address, index: &U256) -> Result<U256, StorageError> {
+        Ok(self
+            .storage
+            .lock()
+            .unwrap()
+            .get(&(*address, *index))
+            .cloned()
+            .unwrap_or(U256::ZERO))
+    }
+
+    fn save_storage(
+        &self,
+        address: &Address,
+        index: &U256,
+        value: &U256,
+    ) -> Result<(), StorageError> {
+        self.storage
+            .lock()
+            .unwrap()
+            .insert((*address, *index), *value);
+        Ok(())
+    }
+
+    fn get_smt_node(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(self.smt_nodes.lock().unwrap().get(hash).cloned())
+    }
+
+    fn save_smt_node(&self, hash: &Hash, node: &[u8]) -> Result<(), StorageError> {
+        self.smt_nodes.lock().unwrap().insert(*hash, node.to_vec());
+        Ok(())
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -154,6 +253,10 @@ impl RedbStorage {
             let _ = write_txn.open_table(TABLE_BLOCKS)?;
             let _ = write_txn.open_table(TABLE_QCS)?;
             let _ = write_txn.open_table(TABLE_META)?;
+            let _ = write_txn.open_table(TABLE_ACCOUNTS)?;
+            let _ = write_txn.open_table(TABLE_STORAGE)?;
+            let _ = write_txn.open_table(TABLE_CODE)?;
+            let _ = write_txn.open_table(TABLE_SMT_NODES)?;
         }
         write_txn.commit()?;
         Ok(Self { db })
@@ -226,5 +329,109 @@ impl Storage for RedbStorage {
         } else {
             Ok(None)
         }
+    }
+
+    fn get_account(&self, address: &Address) -> Result<Option<AccountInfo>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TABLE_ACCOUNTS)?;
+        if let Some(val) = table.get(&*address.0)? {
+            let info = bincode::deserialize(&val.value())?;
+            Ok(Some(info))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn save_account(&self, address: &Address, info: &AccountInfo) -> Result<(), StorageError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(TABLE_ACCOUNTS)?;
+            let val = bincode::serialize(info)?;
+            table.insert(&*address.0, val)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    fn get_code(&self, hash: &Hash) -> Result<Option<Bytes>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TABLE_CODE)?;
+        if let Some(val) = table.get(&hash.0)? {
+            // Store as Vec<u8> which Bytes is wrapper for.
+            let bytes: Vec<u8> = bincode::deserialize(&val.value())?;
+            Ok(Some(Bytes::from(bytes)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn save_code(&self, hash: &Hash, code: &Bytes) -> Result<(), StorageError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(TABLE_CODE)?;
+            let val = bincode::serialize(&code.to_vec())?;
+            table.insert(&hash.0, val)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    fn get_storage(&self, address: &Address, index: &U256) -> Result<U256, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TABLE_STORAGE)?;
+
+        // Composite Key: Address + Index
+        // 20 bytes + 32 bytes = 52 bytes
+        let mut key = Vec::with_capacity(52);
+        key.extend_from_slice(address.as_slice());
+        key.extend_from_slice(&index.to_be_bytes::<32>());
+
+        if let Some(val) = table.get(key.as_slice())? {
+            let value = bincode::deserialize(&val.value())?;
+            Ok(value)
+        } else {
+            Ok(U256::ZERO)
+        }
+    }
+
+    fn save_storage(
+        &self,
+        address: &Address,
+        index: &U256,
+        value: &U256,
+    ) -> Result<(), StorageError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(TABLE_STORAGE)?;
+            let mut key = Vec::with_capacity(52);
+            key.extend_from_slice(address.as_slice());
+            key.extend_from_slice(&index.to_be_bytes::<32>());
+
+            let val = bincode::serialize(value)?;
+            table.insert(key.as_slice(), val)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    fn get_smt_node(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TABLE_SMT_NODES)?;
+        if let Some(val) = table.get(&hash.0)? {
+            // SMT nodes are stored as Vec<u8>
+            Ok(Some(val.value().to_vec()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn save_smt_node(&self, hash: &Hash, node: &[u8]) -> Result<(), StorageError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(TABLE_SMT_NODES)?;
+            table.insert(&hash.0, node.to_vec())?;
+        }
+        write_txn.commit()?;
+        Ok(())
     }
 }

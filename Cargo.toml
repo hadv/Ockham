@@ -20,5 +20,8 @@ sha2 = "0.10.9"
 thiserror = "2.0.17"
 tokio = { version = "1.48.0", features = ["full", "macros", "rt-multi-thread"] }
 jsonrpsee = { version = "0.24.7", features = ["server", "macros"] }
+revm = { version = "3.0", features = ["std", "serde"] }
+alloy-primitives = { version = "0.4", features = ["serde"] }
+sparse-merkle-tree = "0.6"
 
 

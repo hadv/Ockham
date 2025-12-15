@@ -11,18 +11,40 @@ fn test_timeout_chain_extension() {
 
     // Node 0
     let storage = std::sync::Arc::new(ockham::storage::MemStorage::new());
+    let tx_pool = std::sync::Arc::new(ockham::tx_pool::TxPool::new(storage.clone()));
+    let state_manager = std::sync::Arc::new(std::sync::Mutex::new(
+        ockham::state::StateManager::new(storage.clone()),
+    ));
+    let executor = ockham::vm::Executor::new(
+        state_manager.clone(),
+        ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
+    );
+
     let mut node0 = SimplexState::new(
         keys[0].0.clone(),
         keys[0].1.clone(),
         committee.clone(),
         storage,
+        tx_pool,
+        executor,
+        ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
     );
     let genesis_block_hash = node0.preferred_block;
 
     // --- VIEW 1 (Normal) ---
     // Create Block 1
     let qc0 = QuorumCertificate::default();
-    let b1 = Block::new(keys[0].0.clone(), 1, genesis_block_hash, qc0, vec![1]);
+    let b1 = Block::new(
+        keys[0].0.clone(),
+        1,
+        genesis_block_hash,
+        qc0,
+        ockham::crypto::Hash::default(),
+        ockham::crypto::Hash::default(),
+        vec![],
+        ockham::types::U256::ZERO,
+        0,
+    );
     let b1_hash = hash_data(&b1);
 
     // Node 0 processes B1

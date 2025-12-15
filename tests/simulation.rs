@@ -9,15 +9,31 @@ fn test_three_chain_commit() {
         (0..4).map(|_| ockham::crypto::generate_keypair()).collect();
     let committee: Vec<PublicKey> = keys.iter().map(|k| k.0.clone()).collect();
 
+    // Shared tx pool and executor not really needed for this simulation unless we execute.
+    // We need to provide dummy ones.
+
     // Instantiate State for Node 0 (Leader 1)
     let mut nodes: Vec<SimplexState> = (0..4)
         .map(|i| {
             let storage = std::sync::Arc::new(ockham::storage::MemStorage::new());
+            // Create individual tx pool and executor for each node
+            let tx_pool = std::sync::Arc::new(ockham::tx_pool::TxPool::new(storage.clone()));
+            let state_manager = std::sync::Arc::new(std::sync::Mutex::new(
+                ockham::state::StateManager::new(storage.clone()),
+            ));
+            let executor = ockham::vm::Executor::new(
+                state_manager.clone(),
+                ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
+            );
+
             SimplexState::new(
                 keys[i].0.clone(),
                 keys[i].1.clone(),
                 committee.clone(),
                 storage,
+                tx_pool,
+                executor,
+                ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
             )
         })
         .collect();
@@ -28,7 +44,17 @@ fn test_three_chain_commit() {
     // Leader 0 creates Block 1 (parent = Genesis)
     let genesis_hash = nodes[0].preferred_block;
     let qc0 = QuorumCertificate::default(); // genesis QC
-    let b1 = Block::new(keys[0].0.clone(), 1, genesis_hash, qc0, vec![1, 2, 3]);
+    let b1 = Block::new(
+        keys[0].0.clone(),
+        1,
+        genesis_hash,
+        qc0,
+        ockham::crypto::Hash::default(),
+        ockham::crypto::Hash::default(),
+        vec![],
+        ockham::types::U256::ZERO,
+        0,
+    );
     let b1_hash = hash_data(&b1);
 
     println!("Block 1 Hash: {:?}", b1_hash);
@@ -88,7 +114,18 @@ fn test_three_chain_commit() {
     nodes[1].storage.save_block(&b1).unwrap();
 
     // Node 1 proposes b2
-    let b2 = Block::new(keys[1].0.clone(), 2, b1_hash, qc1.clone(), vec![4, 5, 6]);
+    // Node 1 proposes b2
+    let b2 = Block::new(
+        keys[1].0.clone(),
+        2,
+        b1_hash,
+        qc1.clone(),
+        ockham::crypto::Hash::default(),
+        ockham::crypto::Hash::default(),
+        vec![],
+        ockham::types::U256::ZERO,
+        0,
+    );
     let b2_hash = hash_data(&b2);
 
     // All nodes vote for b2

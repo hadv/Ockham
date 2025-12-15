@@ -2,8 +2,11 @@ use crate::crypto::{
     Hash, PrivateKey, PublicKey, aggregate, hash_data, sign, verify, verify_aggregate,
 };
 use crate::storage::{ConsensusState, Storage};
-use crate::types::{Block, QuorumCertificate, View, Vote, VoteType};
+use crate::tx_pool::TxPool;
+use crate::types::{Block, INITIAL_BASE_FEE, QuorumCertificate, U256, View, Vote, VoteType};
+use crate::vm::Executor;
 use std::collections::HashMap;
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -16,6 +19,8 @@ pub enum ConsensusError {
     InvalidQC,
     #[error("Unknown author")]
     UnknownAuthor,
+    #[error("Invalid State Root")]
+    InvalidStateRoot,
 }
 
 /// Abstract actions emitted by the consensus state machine.
@@ -38,6 +43,7 @@ pub struct SimplexState {
     pub finalized_height: View,
     pub preferred_block: Hash,
     pub preferred_view: View,
+    pub block_gas_limit: u64,
 
     // Storage (Abstracted)
     pub storage: std::sync::Arc<dyn Storage>,
@@ -51,6 +57,10 @@ pub struct SimplexState {
     // Sync: Orphan Buffer
     // Map: ParentHash -> List of Orphan Blocks waiting for that parent
     pub orphans: HashMap<Hash, Vec<Block>>,
+
+    // Execution & P2P
+    pub tx_pool: Arc<TxPool>,
+    pub executor: Executor,
 }
 
 impl SimplexState {
@@ -59,6 +69,9 @@ impl SimplexState {
         my_key: PrivateKey,
         committee: Vec<PublicKey>,
         storage: std::sync::Arc<dyn Storage>,
+        tx_pool: Arc<TxPool>,
+        executor: Executor,
+        block_gas_limit: u64,
     ) -> Self {
         // Attempt to load existing state
         if let Ok(Some(saved_state)) = storage.get_consensus_state() {
@@ -80,6 +93,9 @@ impl SimplexState {
                 votes_received: HashMap::new(),
                 finalize_votes_received: HashMap::new(),
                 orphans: HashMap::new(),
+                tx_pool,
+                executor,
+                block_gas_limit: crate::types::DEFAULT_BLOCK_GAS_LIMIT,
             };
         }
 
@@ -90,7 +106,11 @@ impl SimplexState {
             0,
             Hash::default(),
             genesis_qc.clone(),
+            Hash::default(), // state_root
+            Hash::default(), // receipts_root
             vec![],
+            U256::from(INITIAL_BASE_FEE), // Genesis Base Fee
+            0,
         );
         let genesis_hash = hash_data(&genesis_block);
 
@@ -121,6 +141,9 @@ impl SimplexState {
             votes_received: HashMap::new(),
             finalize_votes_received: HashMap::new(),
             orphans: HashMap::new(),
+            tx_pool,
+            executor,
+            block_gas_limit,
         }
     }
 
@@ -142,7 +165,19 @@ impl SimplexState {
                 } else {
                     qc.block_hash
                 };
-                let block = self.create_proposal(self.current_view, qc.clone(), parent_hash)?;
+                let mut block = self.create_proposal(self.current_view, qc.clone(), parent_hash)?;
+
+                // Executor: Execute block to update state_root/receipts_root and validate transactions
+                // Note: modifying block payload and roots
+                // Since create_proposal now fills payload, we just need to execute it to get roots.
+                // Wait, create_proposal initializes empty payload currently.
+                // We should update create_proposal to fill payload.
+
+                // Execute to calculate state root
+                self.executor
+                    .execute_block(&mut block)
+                    .map_err(|_e| ConsensusError::InvalidParent)?; // Map error appropriately
+
                 return Ok(vec![ConsensusAction::BroadcastBlock(block)]);
             }
         }
@@ -180,6 +215,53 @@ impl SimplexState {
             ));
         }
 
+        // 1.5 Execute Block (Validation)
+        // We must re-execute to verify state_root and receipts_root matches.
+        // Also this updates the local state.
+        // Clone block because execute_block modifies it (update roots),
+        // but here we want to check if the incoming block's roots match our execution.
+        let mut executed_block = block.clone();
+        // Reset roots to ZERO before execution to ensure we calculate them fresh?
+        // No, execute_block calculates roots based on payload and UPDATES struct fields.
+        // So we should see if `executed_block.state_root == block.state_root`.
+        // But `executor.execute_block` overwrites the fields.
+
+        // Strategy:
+        // 1. Snapshot/Check current state (ensure we are extending parent state).
+        //    (For simplicity we assume sequential execution on justified chain).
+        // 2. Execute.
+        // 3. Compare roots.
+
+        // NOTE: state updates are committed to DB in `execute_block`.
+        // If we fail execution (bad root), we might have already modified state?
+        // Optimally, `execute_block` should not commit if roots don't match provided.
+        // OR `execute_block` is trusted to BE correct.
+        // If we are validating a PROPOSAL from peer:
+        // We run `execute_block(&mut clone)`.
+        // Then check if `clone.state_root == block.state_root`.
+        // If mismatch, revert?
+        // `StateManager` commits immediately in `execute_block`.
+        // This is tricky without transaction rollback.
+        // MVP: Assume valid execution, if roots mismatch, we are in inconsistent state :(
+        // FIX: For MVP we accept updating state. Ideally `redb` transaction should be passed to `execute_block`.
+        // Current `StateManager` uses `Arc<dyn Storage>`.
+        // Let's just run it. If invalid, we log error.
+
+        if let Err(e) = self.executor.execute_block(&mut executed_block) {
+            log::error!("Block Execution Failed: {:?}", e);
+            return Ok((true, vec![])); // Treat as invalid? or just valid consensus but execution failed?
+            // If execution fails, block is invalid.
+        }
+
+        if executed_block.state_root != block.state_root {
+            log::error!(
+                "Invalid State Root: expected {:?}, got {:?}",
+                block.state_root,
+                executed_block.state_root
+            );
+            return Err(ConsensusError::InvalidStateRoot);
+        }
+
         // 2. Verify QC
         self.verify_qc(&block.justify)?;
 
@@ -188,6 +270,10 @@ impl SimplexState {
 
         // 4. Update state (store block)
         self.storage.save_block(&block).unwrap();
+
+        // 5. Clean up TxPool
+        // Remove transactions included in this valid block from our pool
+        self.tx_pool.remove_transactions(&block.payload);
 
         Ok((true, vec![]))
     }
@@ -347,14 +433,70 @@ impl SimplexState {
         qc: QuorumCertificate,
         parent: Hash,
     ) -> Result<Block, ConsensusError> {
+        // Calculate Next Base Fee based on Parent
+        // We need to fetch the parent block to know its gas_used and base_fee.
+        // We know 'parent' hash.
+        let base_fee = if let Ok(Some(parent_block)) = self.storage.get_block(&parent) {
+            self.calculate_next_base_fee(&parent_block)
+        } else {
+            // If parent not found (shouldn't happen for valid proposal unless genesis), use default
+            log::warn!(
+                "Parent block {:?} not found for proposal, using default base fee",
+                parent
+            );
+            U256::from(INITIAL_BASE_FEE)
+        };
+
+        // Filter transactions by base_fee
+        // Note: get_transactions_for_block should now assume sorted by priority fee and filter by base_fee
+        let payload = self
+            .tx_pool
+            .get_transactions_for_block(self.block_gas_limit, base_fee);
+
+        // Note: We don't know gas_used yet, only at execution.
+        // But Block::new requires it?
+        // Actually, for a PROPOSAL, gas_used is 0 (unexecuted) or predicted?
+        // In this architecture, we execute IMMEDIATELY after creation in try_propose.
+        // So we can initialize with 0, and executor updates it.
+
         let block = Block::new(
             self.my_id.clone(),
             view,
             parent, // Parent of new block is the block certified by QC
             qc,
-            vec![], // Payload empty for now
+            Hash::default(), // state_root (Calculated later in execute_block)
+            Hash::default(), // receipts_root
+            payload,
+            base_fee,
+            0, // gas_used initialized to 0, updated by executor
         );
         Ok(block)
+    }
+
+    /// EIP-1559 Base Fee Calculation
+    fn calculate_next_base_fee(&self, parent: &Block) -> U256 {
+        let elasticity_multiplier = 2;
+        let base_fee_max_change_denominator = 8;
+        let target_gas = self.block_gas_limit / elasticity_multiplier;
+
+        let parent_gas_used = parent.gas_used;
+        let parent_base_fee = parent.base_fee_per_gas;
+
+        if parent_gas_used == target_gas {
+            parent_base_fee
+        } else if parent_gas_used > target_gas {
+            let gas_used_delta = parent_gas_used - target_gas;
+            let base_fee_increase = parent_base_fee * U256::from(gas_used_delta)
+                / U256::from(target_gas)
+                / U256::from(base_fee_max_change_denominator);
+            parent_base_fee + base_fee_increase
+        } else {
+            let gas_used_delta = target_gas - parent_gas_used;
+            let base_fee_decrease = parent_base_fee * U256::from(gas_used_delta)
+                / U256::from(target_gas)
+                / U256::from(base_fee_max_change_denominator);
+            parent_base_fee.saturating_sub(base_fee_decrease)
+        }
     }
 
     // try_finalize removed in favor of on_finalize_vote

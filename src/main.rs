@@ -3,8 +3,12 @@ use ockham::consensus::{ConsensusAction, SimplexState};
 use ockham::crypto::PublicKey;
 use ockham::network::{Network, NetworkEvent};
 use ockham::rpc::{OckhamRpcImpl, OckhamRpcServer};
+use ockham::state::StateManager;
+use ockham::tx_pool::TxPool;
+use ockham::vm::Executor;
 use std::env;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::time;
 
@@ -12,12 +16,24 @@ use tokio::time;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
-    // 1. Parse Node ID from args (0, 1, 2, 3)
+    // 1. Parse Node ID from args (0, 1, 2, 3) and Gas Limit
     let args: Vec<String> = env::args().collect();
     let id_arg = args
         .get(1)
-        .expect("Usage: cargo run -- <node_id>")
+        .expect("Usage: cargo run -- <node_id> [--gas-limit <value>]")
         .parse::<u64>()?;
+
+    // Parse Optional --gas-limit
+    let mut block_gas_limit = ockham::types::DEFAULT_BLOCK_GAS_LIMIT;
+    if let Some(val) = args
+        .iter()
+        .position(|r| r == "--gas-limit")
+        .and_then(|pos| args.get(pos + 1))
+    {
+        block_gas_limit = val.parse::<u64>()?;
+        log::info!("Configured Block Gas Limit: {}", block_gas_limit);
+    }
+
     // 2. Initialize Consensus
     let (my_id, my_key) = ockham::crypto::generate_keypair_from_id(id_arg);
     let committee: Vec<PublicKey> = (0..5)
@@ -28,13 +44,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let storage: Arc<dyn ockham::storage::Storage> =
         Arc::new(ockham::storage::RedbStorage::new(db_path).expect("Failed to create DB"));
 
-    let mut state = SimplexState::new(my_id, my_key, committee, storage.clone());
+    // 2.1 Initialize Execution Layer
+    let tx_pool = Arc::new(TxPool::new(storage.clone()));
+
+    // StateManager needs to wrap Storage in Arc<Mutex>? No, StateManager holds Arc<dyn Storage>.
+    // But StateManager itself needs to be Arc<Mutex> for Executor.
+    // Wait, StateManager::new(storage) -> StateManager.
+    // Executor::new(Arc<Mutex<StateManager>>) -> Executor.
+
+    // We already have `storage: Arc<dyn Storage>`.
+    // We need to create StateManager.
+    let state_manager = Arc::new(Mutex::new(StateManager::new(storage.clone())));
+    let executor = Executor::new(state_manager.clone(), block_gas_limit);
+
+    let mut state = SimplexState::new(
+        my_id,
+        my_key,
+        committee,
+        storage.clone(),
+        tx_pool.clone(),
+        executor,
+        block_gas_limit,
+    );
 
     // Start RPC Server
     let rpc_port = 8545 + id_arg as u16; // 8545, 8546, ...
     let addr = format!("127.0.0.1:{}", rpc_port);
     let server = Server::builder().build(addr).await?;
-    let rpc_impl = OckhamRpcImpl::new(storage.clone());
+    let rpc_impl = OckhamRpcImpl::new(storage.clone(), tx_pool.clone(), block_gas_limit);
     let handle = server.start(rpc_impl.into_rpc());
     log::info!("RPC Server started on port {}", rpc_port);
 
@@ -127,6 +164,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 state.on_block_response(*block)
                             }
                         }
+                    }
+                    NetworkEvent::TransactionReceived(tx) => {
+                        log::info!("Received Transaction from {:?}", tx.public_key);
+                        if let Err(e) = tx_pool.add_transaction(tx) {
+                             log::warn!("Failed to add transaction: {:?}", e);
+                        } else {
+                             log::info!("Added transaction to pool. Pool size: {}", tx_pool.len());
+                        }
+                        Ok(vec![])
                     }
                 };
 

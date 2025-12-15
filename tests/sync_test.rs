@@ -6,7 +6,17 @@ use ockham::types::{Block, QuorumCertificate};
 /// Helper to create a signed block
 fn create_block(author_id: u64, view: u64, parent_hash: Hash, justify: QuorumCertificate) -> Block {
     let (pk, _) = generate_keypair_from_id(author_id);
-    Block::new(pk, view, parent_hash, justify, vec![])
+    Block::new(
+        pk,
+        view,
+        parent_hash,
+        justify,
+        ockham::crypto::Hash::default(),
+        ockham::crypto::Hash::default(),
+        vec![],
+        ockham::types::U256::ZERO,
+        0,
+    )
 }
 
 #[test]
@@ -17,7 +27,23 @@ fn test_sync_orphan_processing() {
 
     // Initialize Bob (Sync Node)
     let storage = std::sync::Arc::new(MemStorage::new());
-    let mut bob = SimplexState::new(bob_pk, bob_sk, committee, storage);
+    let tx_pool = std::sync::Arc::new(ockham::tx_pool::TxPool::new(storage.clone()));
+    let state_manager = std::sync::Arc::new(std::sync::Mutex::new(
+        ockham::state::StateManager::new(storage.clone()),
+    ));
+    let executor = ockham::vm::Executor::new(
+        state_manager.clone(),
+        ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
+    );
+    let mut bob = SimplexState::new(
+        bob_pk,
+        bob_sk,
+        committee,
+        storage,
+        tx_pool,
+        executor,
+        ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
+    );
 
     // Create a chain of blocks (Geneis -> B1 -> B2 -> B3)
     let genesis_hash = bob.preferred_block;
@@ -109,7 +135,23 @@ fn test_sync_block_serving() {
 
     // Initialize Alice
     let storage = std::sync::Arc::new(MemStorage::new());
-    let alice = SimplexState::new(alice_pk.clone(), alice_sk, committee, storage);
+    let tx_pool = std::sync::Arc::new(ockham::tx_pool::TxPool::new(storage.clone()));
+    let state_manager = std::sync::Arc::new(std::sync::Mutex::new(
+        ockham::state::StateManager::new(storage.clone()),
+    ));
+    let executor = ockham::vm::Executor::new(
+        state_manager.clone(),
+        ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
+    );
+    let alice = SimplexState::new(
+        alice_pk.clone(),
+        alice_sk,
+        committee,
+        storage,
+        tx_pool,
+        executor,
+        ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
+    );
 
     // Create a block and save it
     let genesis_qc = QuorumCertificate::default();

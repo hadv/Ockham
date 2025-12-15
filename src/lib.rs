@@ -2,5 +2,8 @@ pub mod consensus;
 pub mod crypto;
 pub mod network;
 pub mod rpc;
+pub mod state;
 pub mod storage;
+pub mod tx_pool;
 pub mod types;
+pub mod vm;

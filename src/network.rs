@@ -1,4 +1,4 @@
-use crate::types::{Block, Vote};
+use crate::types::{Block, Transaction, Vote};
 use futures::StreamExt;
 use libp2p::{
     Multiaddr, gossipsub, mdns, noise, swarm::NetworkBehaviour, swarm::SwarmEvent, tcp, yamux,
@@ -21,6 +21,7 @@ pub struct SimplexBehaviour {
 pub enum NetworkEvent {
     VoteReceived(Vote),
     BlockReceived(Block),
+    TransactionReceived(Transaction),
     SyncMessageReceived(crate::types::SyncMessage, String), // Message + PeerId
     PeerConnected(String),
 }
@@ -30,6 +31,7 @@ pub enum NetworkEvent {
 enum NetworkCommand {
     Broadcastblock(Block),
     BroadcastVote(Vote),
+    BroadcastTransaction(Transaction),
     BroadcastSync(crate::types::SyncMessage),
     Dial(Multiaddr),
 }
@@ -128,6 +130,8 @@ impl Network {
                                  let _ = event_sender.send(NetworkEvent::BlockReceived(block)).await;
                              } else if let Ok(vote) = serde_json::from_slice::<Vote>(&message.data) {
                                  let _ = event_sender.send(NetworkEvent::VoteReceived(vote)).await;
+                             } else if let Ok(tx) = serde_json::from_slice::<Transaction>(&message.data) {
+                                let _ = event_sender.send(NetworkEvent::TransactionReceived(tx)).await;
                              } else if let Ok(sync_msg) = serde_json::from_slice::<crate::types::SyncMessage>(&message.data) {
                                 let peer_id = message.source.map(|p| p.to_string()).unwrap_or_default();
                                 let _ = event_sender.send(NetworkEvent::SyncMessageReceived(sync_msg, peer_id)).await;
@@ -156,6 +160,16 @@ impl Network {
                                  }
                               }
                          },
+                          Some(NetworkCommand::BroadcastTransaction(tx)) => {
+                               let data = serde_json::to_vec(&tx).unwrap();
+                               let topic = gossipsub::IdentTopic::new("simplex-consensus");
+                               if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic, data) {
+                                  match e {
+                                      gossipsub::PublishError::Duplicate => {},
+                                      _ => println!("Publish error: {e:?}"),
+                                  }
+                               }
+                          },
                          Some(NetworkCommand::BroadcastSync(msg)) => {
                               let data = serde_json::to_vec(&msg).unwrap();
                               let topic = gossipsub::IdentTopic::new("simplex-consensus");
@@ -210,6 +224,13 @@ impl Network {
         let _ = self
             .command_sender
             .send(NetworkCommand::BroadcastSync(msg))
+            .await;
+    }
+
+    pub async fn broadcast_transaction(&self, tx: Transaction) {
+        let _ = self
+            .command_sender
+            .send(NetworkCommand::BroadcastTransaction(tx))
             .await;
     }
 

@@ -13,17 +13,38 @@ fn test_explicit_finalization() {
     let committee: Vec<PublicKey> = keys.iter().map(|k| k.0.clone()).collect();
 
     let storage = std::sync::Arc::new(ockham::storage::MemStorage::new());
+    let tx_pool = std::sync::Arc::new(ockham::tx_pool::TxPool::new(storage.clone()));
+    let state_manager = std::sync::Arc::new(std::sync::Mutex::new(
+        ockham::state::StateManager::new(storage.clone()),
+    ));
+    let executor = ockham::vm::Executor::new(
+        state_manager.clone(),
+        ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
+    );
     let mut node0 = SimplexState::new(
         keys[0].0.clone(),
         keys[0].1.clone(),
         committee.clone(),
         storage,
+        tx_pool,
+        executor,
+        ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
     );
 
     // 2. Proposal for View 1
     let genesis_hash = node0.preferred_block;
     let qc0 = QuorumCertificate::default();
-    let b1 = Block::new(keys[0].0.clone(), 1, genesis_hash, qc0, vec![]);
+    let b1 = Block::new(
+        keys[0].0.clone(),
+        1,
+        genesis_hash,
+        qc0,
+        ockham::crypto::Hash::default(),
+        ockham::crypto::Hash::default(),
+        vec![],
+        ockham::types::U256::ZERO,
+        0,
+    );
 
     // 3. Node 0 receives Block 1 -> Should Vote (Notarize)
     let actions = node0.on_proposal(b1.clone()).unwrap();

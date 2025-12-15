@@ -26,7 +26,23 @@ fn test_redb_persistence() {
     {
         println!("--- Run 1: Init Genesis ---");
         let storage = std::sync::Arc::new(RedbStorage::new(db_path).unwrap());
-        let state = SimplexState::new(pk.clone(), sk.clone(), committee.clone(), storage);
+        let tx_pool = std::sync::Arc::new(ockham::tx_pool::TxPool::new(storage.clone()));
+        let state_manager = std::sync::Arc::new(std::sync::Mutex::new(
+            ockham::state::StateManager::new(storage.clone()),
+        ));
+        let executor = ockham::vm::Executor::new(
+            state_manager.clone(),
+            ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
+        );
+        let state = SimplexState::new(
+            pk.clone(),
+            sk.clone(),
+            committee.clone(),
+            storage,
+            tx_pool,
+            executor,
+            ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
+        );
 
         assert_eq!(state.current_view, 1);
         assert_eq!(state.finalized_height, 0);
@@ -37,8 +53,24 @@ fn test_redb_persistence() {
     {
         println!("--- Run 2: Restart & Load ---");
         let storage = std::sync::Arc::new(RedbStorage::new(db_path).unwrap());
+        let tx_pool = std::sync::Arc::new(ockham::tx_pool::TxPool::new(storage.clone()));
+        let state_manager = std::sync::Arc::new(std::sync::Mutex::new(
+            ockham::state::StateManager::new(storage.clone()),
+        ));
+        let executor = ockham::vm::Executor::new(
+            state_manager.clone(),
+            ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
+        );
         // Use same key/committee (irrelevant for loading state, but needed for struct)
-        let state = SimplexState::new(pk.clone(), sk.clone(), committee.clone(), storage);
+        let state = SimplexState::new(
+            pk.clone(),
+            sk.clone(),
+            committee.clone(),
+            storage,
+            tx_pool,
+            executor,
+            ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
+        );
 
         // Should have loaded state
         assert_eq!(state.current_view, 1);
