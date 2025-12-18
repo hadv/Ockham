@@ -15,9 +15,171 @@ pub enum StateError {
     Smt(String),
 }
 
-// Reverting to DefaultStore because we cannot find the Store trait to implement OckhamSmtStore.
-// TODO: Find correct trait path for sparse_merkle_tree::traits::Store to enable persistence.
-pub type SmtStore = sparse_merkle_tree::default_store::DefaultStore<H256>;
+use serde::{Deserialize, Serialize};
+use sparse_merkle_tree::traits::{StoreReadOps, StoreWriteOps};
+use sparse_merkle_tree::{BranchKey, BranchNode};
+
+// --- Serialization Mirrors ---
+
+#[derive(Serialize, Deserialize)]
+enum SerdeMergeValue {
+    Value([u8; 32]),
+    MergeWithZero {
+        base_node: [u8; 32],
+        zero_bits: [u8; 32],
+        zero_count: u8,
+    },
+    // ShortCut not supported (feature 'trie' off)
+}
+
+impl From<sparse_merkle_tree::merge::MergeValue> for SerdeMergeValue {
+    fn from(v: sparse_merkle_tree::merge::MergeValue) -> Self {
+        use sparse_merkle_tree::merge::MergeValue::*;
+        match v {
+            Value(h) => SerdeMergeValue::Value(h.into()),
+            MergeWithZero {
+                base_node,
+                zero_bits,
+                zero_count,
+            } => SerdeMergeValue::MergeWithZero {
+                base_node: base_node.into(),
+                zero_bits: zero_bits.into(),
+                zero_count,
+            },
+        }
+    }
+}
+
+impl Into<sparse_merkle_tree::merge::MergeValue> for SerdeMergeValue {
+    fn into(self) -> sparse_merkle_tree::merge::MergeValue {
+        use sparse_merkle_tree::merge::MergeValue::*;
+        match self {
+            SerdeMergeValue::Value(h) => Value(H256::from(h)),
+            SerdeMergeValue::MergeWithZero {
+                base_node,
+                zero_bits,
+                zero_count,
+            } => MergeWithZero {
+                base_node: H256::from(base_node),
+                zero_bits: H256::from(zero_bits),
+                zero_count,
+            },
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct SerdeBranchNode {
+    left: SerdeMergeValue,
+    right: SerdeMergeValue,
+}
+
+impl From<BranchNode> for SerdeBranchNode {
+    fn from(n: BranchNode) -> Self {
+        SerdeBranchNode {
+            left: n.left.into(),
+            right: n.right.into(),
+        }
+    }
+}
+
+impl Into<BranchNode> for SerdeBranchNode {
+    fn into(self) -> BranchNode {
+        BranchNode {
+            left: self.left.into(),
+            right: self.right.into(),
+        }
+    }
+}
+
+// --- Store Implementation ---
+
+#[derive(Clone)]
+pub struct OckhamSmtStore {
+    storage: Arc<dyn Storage>,
+}
+
+impl OckhamSmtStore {
+    pub fn new(storage: Arc<dyn Storage>) -> Self {
+        Self { storage }
+    }
+}
+
+impl StoreReadOps<H256> for OckhamSmtStore {
+    fn get_branch(
+        &self,
+        branch_key: &BranchKey,
+    ) -> Result<Option<BranchNode>, sparse_merkle_tree::error::Error> {
+        let node_hash = Hash(branch_key.node_key.into());
+        match self.storage.get_smt_branch(branch_key.height, &node_hash) {
+            Ok(Some(bytes)) => {
+                let serde_node: SerdeBranchNode = bincode::deserialize(&bytes)
+                    .map_err(|e| sparse_merkle_tree::error::Error::Store(e.to_string()))?;
+                Ok(Some(serde_node.into()))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(sparse_merkle_tree::error::Error::Store(e.to_string())),
+        }
+    }
+
+    fn get_leaf(&self, leaf_key: &H256) -> Result<Option<H256>, sparse_merkle_tree::error::Error> {
+        let hash = Hash((*leaf_key).into());
+        match self.storage.get_smt_leaf(&hash) {
+            Ok(Some(bytes)) => {
+                let val: [u8; 32] = bincode::deserialize(&bytes)
+                    .map_err(|e| sparse_merkle_tree::error::Error::Store(e.to_string()))?;
+                Ok(Some(H256::from(val)))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(sparse_merkle_tree::error::Error::Store(e.to_string())),
+        }
+    }
+}
+
+impl StoreWriteOps<H256> for OckhamSmtStore {
+    fn insert_branch(
+        &mut self,
+        node_key: BranchKey,
+        branch: BranchNode,
+    ) -> Result<(), sparse_merkle_tree::error::Error> {
+        let serde_node: SerdeBranchNode = branch.into();
+        let bytes = bincode::serialize(&serde_node)
+            .map_err(|e| sparse_merkle_tree::error::Error::Store(e.to_string()))?;
+
+        let hash = Hash(node_key.node_key.into());
+        self.storage
+            .save_smt_branch(node_key.height, &hash, &bytes)
+            .map_err(|e| sparse_merkle_tree::error::Error::Store(e.to_string()))
+    }
+
+    fn insert_leaf(
+        &mut self,
+        leaf_key: H256,
+        leaf: H256,
+    ) -> Result<(), sparse_merkle_tree::error::Error> {
+        let leaf_bytes: [u8; 32] = leaf.into();
+        let bytes = bincode::serialize(&leaf_bytes)
+            .map_err(|e| sparse_merkle_tree::error::Error::Store(e.to_string()))?;
+
+        let hash = Hash(leaf_key.into());
+        self.storage
+            .save_smt_leaf(&hash, &bytes)
+            .map_err(|e| sparse_merkle_tree::error::Error::Store(e.to_string()))
+    }
+
+    fn remove_branch(
+        &mut self,
+        _node_key: &BranchKey,
+    ) -> Result<(), sparse_merkle_tree::error::Error> {
+        Ok(())
+    }
+
+    fn remove_leaf(&mut self, _leaf_key: &H256) -> Result<(), sparse_merkle_tree::error::Error> {
+        Ok(())
+    }
+}
+
+pub type SmtStore = OckhamSmtStore;
 pub type StateTree = SparseMerkleTree<sparse_merkle_tree::blake2b::Blake2bHasher, H256, SmtStore>;
 
 pub struct StateManager {
@@ -28,7 +190,7 @@ pub struct StateManager {
 impl StateManager {
     // Keep signature compatible with tests (ignoring initial_root for now)
     pub fn new(storage: Arc<dyn Storage>, initial_root: Option<Hash>) -> Self {
-        let store = SmtStore::default();
+        let store = SmtStore::new(storage.clone());
         let root = initial_root
             .map(|h| H256::from(h.0))
             .unwrap_or(H256::zero());
@@ -47,8 +209,8 @@ impl StateManager {
     }
 
     pub fn fork(&self, new_root: Hash, storage: Arc<dyn Storage>) -> Self {
-        let tree = self.tree.lock().unwrap();
-        let store = tree.store().clone();
+        // Create a new SmtStore backed by the provided storage (e.g. Overlay)
+        let store = SmtStore::new(storage.clone());
         let new_tree = SparseMerkleTree::new(sparse_merkle_tree::H256::from(new_root.0), store);
         Self {
             tree: Arc::new(Mutex::new(new_tree)),

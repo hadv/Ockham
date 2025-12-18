@@ -40,7 +40,7 @@ async fn test_inject_transactions() {
                 // Don't panic, just log (might be temporary pool issue)
             }
         }
-        sleep(Duration::from_millis(500)).await;
+        // Removed sleep to send transactions faster
     }
 
     // Pass if we sent them without panic
