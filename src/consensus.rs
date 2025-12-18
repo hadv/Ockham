@@ -1,7 +1,7 @@
 use crate::crypto::{
     Hash, PrivateKey, PublicKey, aggregate, hash_data, sign, verify, verify_aggregate,
 };
-use crate::state::StateManager;
+
 use crate::storage::{ConsensusState, StateOverlay, Storage};
 use crate::tx_pool::TxPool;
 use crate::types::{Block, INITIAL_BASE_FEE, QuorumCertificate, U256, View, Vote, VoteType};
@@ -26,6 +26,8 @@ pub enum ConsensusError {
     InvalidStateRoot,
     #[error("Invalid Receipts Root")]
     InvalidReceiptsRoot,
+    #[error("Invalid Signature")]
+    InvalidSignature,
 }
 
 /// Abstract actions emitted by the consensus state machine.
@@ -207,12 +209,25 @@ impl SimplexState {
                 // USE EPHEMERAL OVERLAY for execution (do not commit to DB)
                 let overlay = Arc::new(StateOverlay::new(self.storage.clone()));
 
-                // Clone the current SMT state to ensure continuity from parent
-                let current_tree = self.executor.state.lock().unwrap().snapshot();
-                let state_manager = Arc::new(Mutex::new(StateManager::new_from_tree(
-                    overlay,
-                    current_tree,
-                )));
+                // Fork state from Parent Root
+                let parent_root = if parent_hash == Hash::default() {
+                    Hash::default()
+                } else {
+                    self.storage
+                        .get_block(&parent_hash)
+                        .ok()
+                        .flatten()
+                        .map(|b| b.state_root)
+                        .unwrap_or_default()
+                };
+
+                let state_manager = Arc::new(Mutex::new(
+                    self.executor
+                        .state
+                        .lock()
+                        .unwrap()
+                        .fork(parent_root, overlay),
+                ));
 
                 let executor = Executor::new(state_manager, self.block_gas_limit);
 
@@ -329,14 +344,25 @@ impl SimplexState {
         // We must re-execute to verify state_root and receipts_root matches.
         let overlay = Arc::new(StateOverlay::new(self.storage.clone()));
 
-        // Clone the current SMT state to ensure continuity
-        // NOTE: This assumes validation is performed against the state tip.
-        // If validating a fork or future block without intermediate state, this will fail.
-        let current_tree = self.executor.state.lock().unwrap().snapshot();
-        let state_manager = Arc::new(Mutex::new(StateManager::new_from_tree(
-            overlay,
-            current_tree,
-        )));
+        // Fork state from Parent Root
+        let parent_root = if block.parent_hash == Hash::default() {
+            Hash::default()
+        } else {
+            self.storage
+                .get_block(&block.parent_hash)
+                .ok()
+                .flatten()
+                .map(|b| b.state_root)
+                .unwrap_or_default()
+        };
+
+        let state_manager = Arc::new(Mutex::new(
+            self.executor
+                .state
+                .lock()
+                .unwrap()
+                .fork(parent_root, overlay),
+        ));
 
         let executor = Executor::new(state_manager, self.block_gas_limit);
 
@@ -438,9 +464,10 @@ impl SimplexState {
     /// Handle an incoming vote.
     /// If we have enough votes (2f+1), form a QC.
     pub fn on_vote(&mut self, vote: Vote) -> Result<Vec<ConsensusAction>, ConsensusError> {
-        // Verify signature (mocked)
+        // Verify signature
         if !verify(&vote.author, &vote.block_hash.0, &vote.signature) {
-            // For mock, we verify hash matches signature content.
+            log::warn!("Invalid signature from author {:?}", vote.author);
+            return Err(ConsensusError::InvalidSignature);
         }
 
         if vote.vote_type == VoteType::Finalize {
@@ -509,8 +536,29 @@ impl SimplexState {
                     };
 
                     if let Ok(mut block) = self.create_proposal(next_view, qc, parent_hash) {
-                        // Full Proposal Lifecycle
-                        if self.executor.execute_block(&mut block).is_ok() {
+                        // Full Proposal Lifecycle (Ephemeral Execution)
+                        let overlay = Arc::new(StateOverlay::new(self.storage.clone()));
+                        let parent_root = if parent_hash == Hash::default() {
+                            Hash::default()
+                        } else {
+                            self.storage
+                                .get_block(&parent_hash)
+                                .ok()
+                                .flatten()
+                                .map(|b| b.state_root)
+                                .unwrap_or(Hash::default())
+                        };
+
+                        let state_manager = Arc::new(Mutex::new(
+                            self.executor
+                                .state
+                                .lock()
+                                .unwrap()
+                                .fork(parent_root, overlay),
+                        ));
+                        let executor = Executor::new(state_manager, self.block_gas_limit);
+
+                        if executor.execute_block(&mut block).is_ok() {
                             log::info!(
                                 "Proposal Executed (Chain). View: {}, Root: {:?}, Gas: {}",
                                 block.view,

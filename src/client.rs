@@ -70,7 +70,10 @@ impl OckhamClient {
 
         // Priority Fee
         let priority_fee = U256::from(1_000_000); // 0.001 Gwei
-        let max_fee = base_fee + priority_fee;
+        // Use 2x Base Fee buffer to ensure inclusion even if base fee spikes
+        let max_fee = base_fee
+            .saturating_mul(U256::from(2))
+            .saturating_add(priority_fee);
 
         // 4. Construct Transaction
         let mut tx = Transaction {

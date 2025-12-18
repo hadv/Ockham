@@ -27,9 +27,12 @@ pub struct StateManager {
 
 impl StateManager {
     // Keep signature compatible with tests (ignoring initial_root for now)
-    pub fn new(storage: Arc<dyn Storage>, _initial_root: Option<Hash>) -> Self {
+    pub fn new(storage: Arc<dyn Storage>, initial_root: Option<Hash>) -> Self {
         let store = SmtStore::default();
-        let tree = SparseMerkleTree::new(H256::zero(), store);
+        let root = initial_root
+            .map(|h| H256::from(h.0))
+            .unwrap_or(H256::zero());
+        let tree = SparseMerkleTree::new(root, store);
         Self {
             tree: Arc::new(Mutex::new(tree)),
             storage,
@@ -39,6 +42,16 @@ impl StateManager {
     pub fn new_from_tree(storage: Arc<dyn Storage>, tree: StateTree) -> Self {
         Self {
             tree: Arc::new(Mutex::new(tree)),
+            storage,
+        }
+    }
+
+    pub fn fork(&self, new_root: Hash, storage: Arc<dyn Storage>) -> Self {
+        let tree = self.tree.lock().unwrap();
+        let store = tree.store().clone();
+        let new_tree = SparseMerkleTree::new(sparse_merkle_tree::H256::from(new_root.0), store);
+        Self {
+            tree: Arc::new(Mutex::new(new_tree)),
             storage,
         }
     }
