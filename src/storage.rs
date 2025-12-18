@@ -143,6 +143,8 @@ pub trait Storage: Send + Sync {
 // -----------------------------------------------------------------------------
 // In-Memory Storage (for Copy/Clone tests where DB is too heavy or needs paths)
 // -----------------------------------------------------------------------------
+pub type SmtBranchMap = HashMap<(u8, Hash), Vec<u8>>;
+
 #[derive(Clone, Default)]
 pub struct MemStorage {
     blocks: Arc<Mutex<HashMap<Hash, Block>>>,
@@ -153,7 +155,7 @@ pub struct MemStorage {
     code: Arc<Mutex<HashMap<Hash, Bytes>>>,
     storage: Arc<Mutex<HashMap<(Address, U256), U256>>>,
     smt_leaves: Arc<Mutex<HashMap<Hash, Vec<u8>>>>,
-    smt_branches: Arc<Mutex<HashMap<(u8, Hash), Vec<u8>>>>,
+    smt_branches: Arc<Mutex<SmtBranchMap>>,
 }
 
 impl MemStorage {
@@ -509,7 +511,7 @@ pub struct StateOverlay {
     storage: Arc<Mutex<HashMap<(Address, U256), U256>>>,
     code: Arc<Mutex<HashMap<Hash, Bytes>>>,
     smt_leaves: Arc<Mutex<HashMap<Hash, Vec<u8>>>>,
-    smt_branches: Arc<Mutex<HashMap<(u8, Hash), Vec<u8>>>>,
+    smt_branches: Arc<Mutex<SmtBranchMap>>,
 }
 
 impl StateOverlay {

@@ -50,10 +50,10 @@ impl From<sparse_merkle_tree::merge::MergeValue> for SerdeMergeValue {
     }
 }
 
-impl Into<sparse_merkle_tree::merge::MergeValue> for SerdeMergeValue {
-    fn into(self) -> sparse_merkle_tree::merge::MergeValue {
+impl From<SerdeMergeValue> for sparse_merkle_tree::merge::MergeValue {
+    fn from(val: SerdeMergeValue) -> Self {
         use sparse_merkle_tree::merge::MergeValue::*;
-        match self {
+        match val {
             SerdeMergeValue::Value(h) => Value(H256::from(h)),
             SerdeMergeValue::MergeWithZero {
                 base_node,
@@ -83,11 +83,11 @@ impl From<BranchNode> for SerdeBranchNode {
     }
 }
 
-impl Into<BranchNode> for SerdeBranchNode {
-    fn into(self) -> BranchNode {
+impl From<SerdeBranchNode> for BranchNode {
+    fn from(val: SerdeBranchNode) -> Self {
         BranchNode {
-            left: self.left.into(),
-            right: self.right.into(),
+            left: val.left.into(),
+            right: val.right.into(),
         }
     }
 }
@@ -340,7 +340,51 @@ impl Database for StateManager {
             .map_err(|e| StateError::Smt(e.to_string()))
     }
 
-    fn block_hash(&mut self, _number: U256) -> Result<B256, Self::Error> {
+    fn block_hash(&mut self, number: U256) -> Result<B256, Self::Error> {
+        // Attempt to convert U256 to u64 for view comparison
+        let requested_view: u64 = match number.try_into() {
+            Ok(v) => v,
+            Err(_) => return Ok(B256::ZERO),
+        };
+
+        // Get the current consensus state to start search from the head
+        let state = self
+            .storage
+            .get_consensus_state()
+            .map_err(|e| StateError::Smt(e.to_string()))?;
+
+        let mut current_hash = match state {
+            Some(s) => s.preferred_block,
+            None => return Ok(B256::ZERO),
+        };
+
+        // EVM blockhash is limited to the last 256 blocks
+        for _ in 0..256 {
+            if current_hash == Hash::default() {
+                break;
+            }
+
+            let block = self
+                .storage
+                .get_block(&current_hash)
+                .map_err(|e| StateError::Smt(e.to_string()))?;
+
+            if let Some(b) = block {
+                if b.view == requested_view {
+                    return Ok(B256::from(current_hash.0));
+                }
+                if b.view < requested_view {
+                    // Given that we traverse backwards, if we see a view smaller
+                    // than requested, the block is not in the canonical chain.
+                    break;
+                }
+                current_hash = b.parent_hash;
+            } else {
+                // Block missing from storage, stop search
+                break;
+            }
+        }
+
         Ok(B256::ZERO)
     }
 }
