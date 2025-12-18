@@ -52,7 +52,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // We already have `storage: Arc<dyn Storage>`.
     // We need to create StateManager.
-    let state_manager = Arc::new(Mutex::new(StateManager::new(storage.clone())));
+    // Try to load initial root from persistent consensus state
+    let initial_root = storage
+        .get_consensus_state()
+        .ok()
+        .flatten()
+        .and_then(|cs| storage.get_block(&cs.preferred_block).ok().flatten())
+        .map(|b| b.state_root);
+
+    log::info!("Starting StateManager with Root: {:?}", initial_root);
+
+    let state_manager = Arc::new(Mutex::new(StateManager::new(storage.clone(), initial_root)));
     let executor = Executor::new(state_manager.clone(), block_gas_limit);
 
     let mut state = SimplexState::new(

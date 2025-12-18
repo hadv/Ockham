@@ -1,6 +1,7 @@
 use ockham::rpc::{OckhamRpcImpl, OckhamRpcServer};
 use ockham::storage::{ConsensusState, MemStorage, Storage};
 use ockham::types::{Block, QuorumCertificate};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[tokio::test]
@@ -13,6 +14,11 @@ async fn test_rpc_get_status() {
         finalized_height: 5,
         preferred_block: ockham::crypto::Hash([0u8; 32]),
         preferred_view: 9,
+        last_voted_view: 9,
+        committee: vec![],
+        pending_validators: vec![],
+        exiting_validators: vec![],
+        stakes: HashMap::new(),
     };
     storage.save_consensus_state(&state).unwrap();
 
@@ -52,6 +58,8 @@ async fn test_rpc_get_block() {
         vec![],
         ockham::types::U256::ZERO,
         0,
+        vec![],
+        ockham::crypto::Hash::default(),
     );
     let block_hash = ockham::crypto::hash_data(&block);
 
@@ -63,6 +71,11 @@ async fn test_rpc_get_block() {
         finalized_height: 0,
         preferred_block: block_hash,
         preferred_view: 1,
+        last_voted_view: 1,
+        committee: vec![],
+        pending_validators: vec![],
+        exiting_validators: vec![],
+        stakes: HashMap::new(),
     };
     storage.save_consensus_state(&state).unwrap();
 

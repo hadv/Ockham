@@ -15,10 +15,171 @@ pub enum StateError {
     Smt(String),
 }
 
-/// We use the default `Blake2bHasher` provided by the crate for the Tree structure itself.
-/// We can still use Keccak for leaf keys before inserting.
-pub type SmtStore = sparse_merkle_tree::default_store::DefaultStore<H256>;
+use serde::{Deserialize, Serialize};
+use sparse_merkle_tree::traits::{StoreReadOps, StoreWriteOps};
+use sparse_merkle_tree::{BranchKey, BranchNode};
 
+// --- Serialization Mirrors ---
+
+#[derive(Serialize, Deserialize)]
+enum SerdeMergeValue {
+    Value([u8; 32]),
+    MergeWithZero {
+        base_node: [u8; 32],
+        zero_bits: [u8; 32],
+        zero_count: u8,
+    },
+    // ShortCut not supported (feature 'trie' off)
+}
+
+impl From<sparse_merkle_tree::merge::MergeValue> for SerdeMergeValue {
+    fn from(v: sparse_merkle_tree::merge::MergeValue) -> Self {
+        use sparse_merkle_tree::merge::MergeValue::*;
+        match v {
+            Value(h) => SerdeMergeValue::Value(h.into()),
+            MergeWithZero {
+                base_node,
+                zero_bits,
+                zero_count,
+            } => SerdeMergeValue::MergeWithZero {
+                base_node: base_node.into(),
+                zero_bits: zero_bits.into(),
+                zero_count,
+            },
+        }
+    }
+}
+
+impl From<SerdeMergeValue> for sparse_merkle_tree::merge::MergeValue {
+    fn from(val: SerdeMergeValue) -> Self {
+        use sparse_merkle_tree::merge::MergeValue::*;
+        match val {
+            SerdeMergeValue::Value(h) => Value(H256::from(h)),
+            SerdeMergeValue::MergeWithZero {
+                base_node,
+                zero_bits,
+                zero_count,
+            } => MergeWithZero {
+                base_node: H256::from(base_node),
+                zero_bits: H256::from(zero_bits),
+                zero_count,
+            },
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct SerdeBranchNode {
+    left: SerdeMergeValue,
+    right: SerdeMergeValue,
+}
+
+impl From<BranchNode> for SerdeBranchNode {
+    fn from(n: BranchNode) -> Self {
+        SerdeBranchNode {
+            left: n.left.into(),
+            right: n.right.into(),
+        }
+    }
+}
+
+impl From<SerdeBranchNode> for BranchNode {
+    fn from(val: SerdeBranchNode) -> Self {
+        BranchNode {
+            left: val.left.into(),
+            right: val.right.into(),
+        }
+    }
+}
+
+// --- Store Implementation ---
+
+#[derive(Clone)]
+pub struct OckhamSmtStore {
+    storage: Arc<dyn Storage>,
+}
+
+impl OckhamSmtStore {
+    pub fn new(storage: Arc<dyn Storage>) -> Self {
+        Self { storage }
+    }
+}
+
+impl StoreReadOps<H256> for OckhamSmtStore {
+    fn get_branch(
+        &self,
+        branch_key: &BranchKey,
+    ) -> Result<Option<BranchNode>, sparse_merkle_tree::error::Error> {
+        let node_hash = Hash(branch_key.node_key.into());
+        match self.storage.get_smt_branch(branch_key.height, &node_hash) {
+            Ok(Some(bytes)) => {
+                let serde_node: SerdeBranchNode = bincode::deserialize(&bytes)
+                    .map_err(|e| sparse_merkle_tree::error::Error::Store(e.to_string()))?;
+                Ok(Some(serde_node.into()))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(sparse_merkle_tree::error::Error::Store(e.to_string())),
+        }
+    }
+
+    fn get_leaf(&self, leaf_key: &H256) -> Result<Option<H256>, sparse_merkle_tree::error::Error> {
+        let hash = Hash((*leaf_key).into());
+        match self.storage.get_smt_leaf(&hash) {
+            Ok(Some(bytes)) => {
+                let val: [u8; 32] = bincode::deserialize(&bytes)
+                    .map_err(|e| sparse_merkle_tree::error::Error::Store(e.to_string()))?;
+                Ok(Some(H256::from(val)))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(sparse_merkle_tree::error::Error::Store(e.to_string())),
+        }
+    }
+}
+
+impl StoreWriteOps<H256> for OckhamSmtStore {
+    fn insert_branch(
+        &mut self,
+        node_key: BranchKey,
+        branch: BranchNode,
+    ) -> Result<(), sparse_merkle_tree::error::Error> {
+        let serde_node: SerdeBranchNode = branch.into();
+        let bytes = bincode::serialize(&serde_node)
+            .map_err(|e| sparse_merkle_tree::error::Error::Store(e.to_string()))?;
+
+        let hash = Hash(node_key.node_key.into());
+        self.storage
+            .save_smt_branch(node_key.height, &hash, &bytes)
+            .map_err(|e| sparse_merkle_tree::error::Error::Store(e.to_string()))
+    }
+
+    fn insert_leaf(
+        &mut self,
+        leaf_key: H256,
+        leaf: H256,
+    ) -> Result<(), sparse_merkle_tree::error::Error> {
+        let leaf_bytes: [u8; 32] = leaf.into();
+        let bytes = bincode::serialize(&leaf_bytes)
+            .map_err(|e| sparse_merkle_tree::error::Error::Store(e.to_string()))?;
+
+        let hash = Hash(leaf_key.into());
+        self.storage
+            .save_smt_leaf(&hash, &bytes)
+            .map_err(|e| sparse_merkle_tree::error::Error::Store(e.to_string()))
+    }
+
+    fn remove_branch(
+        &mut self,
+        _node_key: &BranchKey,
+    ) -> Result<(), sparse_merkle_tree::error::Error> {
+        Ok(())
+    }
+
+    fn remove_leaf(&mut self, _leaf_key: &H256) -> Result<(), sparse_merkle_tree::error::Error> {
+        Ok(())
+    }
+}
+
+pub type SmtStore = OckhamSmtStore;
 pub type StateTree = SparseMerkleTree<sparse_merkle_tree::blake2b::Blake2bHasher, H256, SmtStore>;
 
 pub struct StateManager {
@@ -27,31 +188,51 @@ pub struct StateManager {
 }
 
 impl StateManager {
-    pub fn new(storage: Arc<dyn Storage>) -> Self {
-        let store = SmtStore::default();
-        let tree = SparseMerkleTree::new(H256::zero(), store);
+    // Keep signature compatible with tests (ignoring initial_root for now)
+    pub fn new(storage: Arc<dyn Storage>, initial_root: Option<Hash>) -> Self {
+        let store = SmtStore::new(storage.clone());
+        let root = initial_root
+            .map(|h| H256::from(h.0))
+            .unwrap_or(H256::zero());
+        let tree = SparseMerkleTree::new(root, store);
         Self {
             tree: Arc::new(Mutex::new(tree)),
             storage,
         }
     }
 
+    pub fn new_from_tree(storage: Arc<dyn Storage>, tree: StateTree) -> Self {
+        Self {
+            tree: Arc::new(Mutex::new(tree)),
+            storage,
+        }
+    }
+
+    pub fn fork(&self, new_root: Hash, storage: Arc<dyn Storage>) -> Self {
+        // Create a new SmtStore backed by the provided storage (e.g. Overlay)
+        let store = SmtStore::new(storage.clone());
+        let new_tree = SparseMerkleTree::new(sparse_merkle_tree::H256::from(new_root.0), store);
+        Self {
+            tree: Arc::new(Mutex::new(new_tree)),
+            storage,
+        }
+    }
+
+    pub fn snapshot(&self) -> StateTree {
+        let tree = self.tree.lock().unwrap();
+        let root = *tree.root();
+        let store = tree.store().clone();
+        SparseMerkleTree::new(root, store)
+    }
+
     pub fn update_account(&self, address: Address, account_hash: Hash) -> Result<Hash, StateError> {
-        // Convert Address (20 bytes) to H256 (32 bytes) for the key.
-        // We can just pad it or hash it. Hashing it is safer for distribution.
         let key_hash = keccak256(address);
         let key = H256::from(key_hash.0);
-
-        // Value is the hash of the AccountInfo
         let value = H256::from(account_hash.0);
 
         let mut tree = self.tree.lock().unwrap();
         tree.update(key, value)
             .map_err(|e| StateError::Smt(format!("{:?}", e)))?;
-
-        // Also save to storage?
-        // We assume account_info is already saved in TABLE_ACCOUNTS by caller.
-        // If not, we should probably take AccountInfo here too.
 
         let root = tree.root();
         let mut root_bytes = [0u8; 32];
@@ -71,17 +252,12 @@ impl StateManager {
         address: Address,
         info: crate::storage::AccountInfo,
     ) -> Result<(), StateError> {
-        // 1. Save full account data to persistent storage (for VM execution)
         self.storage
             .save_account(&address, &info)
             .map_err(|e| StateError::Smt(e.to_string()))?;
 
-        // 2. Hash the account info (Serialize -> Hash)
         let hash = hash_data(&info);
-
-        // 3. Update the SMT (Commitment)
         self.update_account(address, hash)?;
-
         Ok(())
     }
 
@@ -95,13 +271,29 @@ impl StateManager {
             .save_storage(&address, &index, &value)
             .map_err(|e| StateError::Smt(e.to_string()))
     }
+
+    pub fn get_consensus_state(
+        &self,
+    ) -> Result<Option<crate::storage::ConsensusState>, StateError> {
+        self.storage
+            .get_consensus_state()
+            .map_err(|e| StateError::Smt(e.to_string()))
+    }
+
+    pub fn save_consensus_state(
+        &self,
+        state: &crate::storage::ConsensusState,
+    ) -> Result<(), StateError> {
+        self.storage
+            .save_consensus_state(state)
+            .map_err(|e| StateError::Smt(e.to_string()))
+    }
 }
 
 impl Database for StateManager {
     type Error = StateError;
 
     fn basic(&mut self, address: Address) -> Result<Option<RevmAccountInfo>, Self::Error> {
-        // Fetch from storage
         if let Some(info) = self
             .storage
             .get_account(&address)
@@ -110,7 +302,6 @@ impl Database for StateManager {
             let code = if let Some(c) = info.code {
                 Some(Bytecode::new_raw(c))
             } else if info.code_hash != Hash::default() {
-                // Fetch code by hash
                 let code_bytes = self
                     .storage
                     .get_code(&info.code_hash)
@@ -149,9 +340,51 @@ impl Database for StateManager {
             .map_err(|e| StateError::Smt(e.to_string()))
     }
 
-    fn block_hash(&mut self, _number: U256) -> Result<B256, Self::Error> {
-        // TODO: Implement block hash lookup by number
-        // For now return zero
+    fn block_hash(&mut self, number: U256) -> Result<B256, Self::Error> {
+        // Attempt to convert U256 to u64 for view comparison
+        let requested_view: u64 = match number.try_into() {
+            Ok(v) => v,
+            Err(_) => return Ok(B256::ZERO),
+        };
+
+        // Get the current consensus state to start search from the head
+        let state = self
+            .storage
+            .get_consensus_state()
+            .map_err(|e| StateError::Smt(e.to_string()))?;
+
+        let mut current_hash = match state {
+            Some(s) => s.preferred_block,
+            None => return Ok(B256::ZERO),
+        };
+
+        // EVM blockhash is limited to the last 256 blocks
+        for _ in 0..256 {
+            if current_hash == Hash::default() {
+                break;
+            }
+
+            let block = self
+                .storage
+                .get_block(&current_hash)
+                .map_err(|e| StateError::Smt(e.to_string()))?;
+
+            if let Some(b) = block {
+                if b.view == requested_view {
+                    return Ok(B256::from(current_hash.0));
+                }
+                if b.view < requested_view {
+                    // Given that we traverse backwards, if we see a view smaller
+                    // than requested, the block is not in the canonical chain.
+                    break;
+                }
+                current_hash = b.parent_hash;
+            } else {
+                // Block missing from storage, stop search
+                break;
+            }
+        }
+
         Ok(B256::ZERO)
     }
 }

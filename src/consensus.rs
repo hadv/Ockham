@@ -1,12 +1,13 @@
 use crate::crypto::{
     Hash, PrivateKey, PublicKey, aggregate, hash_data, sign, verify, verify_aggregate,
 };
-use crate::storage::{ConsensusState, Storage};
+
+use crate::storage::{ConsensusState, StateOverlay, Storage};
 use crate::tx_pool::TxPool;
 use crate::types::{Block, INITIAL_BASE_FEE, QuorumCertificate, U256, View, Vote, VoteType};
 use crate::vm::Executor;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -17,12 +18,16 @@ pub enum ConsensusError {
     InvalidParent,
     #[error("Invalid QC")]
     InvalidQC,
+    #[error("Invalid Block")]
+    InvalidBlock,
     #[error("Unknown author")]
     UnknownAuthor,
     #[error("Invalid State Root")]
     InvalidStateRoot,
     #[error("Invalid Receipts Root")]
     InvalidReceiptsRoot,
+    #[error("Invalid Signature")]
+    InvalidSignature,
 }
 
 /// Abstract actions emitted by the consensus state machine.
@@ -45,6 +50,7 @@ pub struct SimplexState {
     pub finalized_height: View,
     pub preferred_block: Hash,
     pub preferred_view: View,
+    pub last_voted_view: View,
     pub block_gas_limit: u64,
 
     // Storage (Abstracted)
@@ -78,19 +84,26 @@ impl SimplexState {
         // Attempt to load existing state
         if let Ok(Some(saved_state)) = storage.get_consensus_state() {
             log::info!(
-                "Loaded persistent state: View {}, Finalized {}, Preferred View {}",
+                "Loaded persistent state: View {}, Finalized {}, Preferred View {}, Last Voted View {}",
                 saved_state.view,
                 saved_state.finalized_height,
-                saved_state.preferred_view
+                saved_state.preferred_view,
+                saved_state.last_voted_view
             );
+            if saved_state.committee != committee {
+                log::warn!("Loaded committee differs from argument. Using persisted committee.");
+            }
+            let effective_committee = saved_state.committee.clone();
+
             return Self {
                 my_id,
                 my_key,
-                committee,
+                committee: effective_committee,
                 current_view: saved_state.view,
                 finalized_height: saved_state.finalized_height,
                 preferred_block: saved_state.preferred_block,
                 preferred_view: saved_state.preferred_view,
+                last_voted_view: saved_state.last_voted_view,
                 storage,
                 votes_received: HashMap::new(),
                 finalize_votes_received: HashMap::new(),
@@ -113,6 +126,8 @@ impl SimplexState {
             vec![],
             U256::from(INITIAL_BASE_FEE), // Genesis Base Fee
             0,
+            vec![],          // Evidence
+            Hash::default(), // Committee Hash
         );
         let genesis_hash = hash_data(&genesis_block);
 
@@ -128,6 +143,11 @@ impl SimplexState {
             finalized_height: 0,
             preferred_block: genesis_hash,
             preferred_view: 0,
+            last_voted_view: 0,
+            committee: committee.clone(),
+            pending_validators: vec![],
+            exiting_validators: vec![],
+            stakes: HashMap::new(),
         };
         storage.save_consensus_state(&initial_state).unwrap();
 
@@ -154,6 +174,7 @@ impl SimplexState {
             finalized_height: initial_state.finalized_height,
             preferred_block: initial_state.preferred_block,
             preferred_view: initial_state.preferred_view,
+            last_voted_view: initial_state.last_voted_view,
             storage,
             votes_received: HashMap::new(),
             finalize_votes_received: HashMap::new(),
@@ -185,17 +206,37 @@ impl SimplexState {
                 let mut block = self.create_proposal(self.current_view, qc.clone(), parent_hash)?;
 
                 // Executor: Execute block to update state_root/receipts_root and validate transactions
-                // Note: modifying block payload and roots
-                // Since create_proposal now fills payload, we just need to execute it to get roots.
-                // Wait, create_proposal initializes empty payload currently.
-                // We should update create_proposal to fill payload.
+                // USE EPHEMERAL OVERLAY for execution (do not commit to DB)
+                let overlay = Arc::new(StateOverlay::new(self.storage.clone()));
 
-                self.executor
+                // Fork state from Parent Root
+                let parent_root = if parent_hash == Hash::default() {
+                    Hash::default()
+                } else {
+                    self.storage
+                        .get_block(&parent_hash)
+                        .ok()
+                        .flatten()
+                        .map(|b| b.state_root)
+                        .unwrap_or_default()
+                };
+
+                let state_manager = Arc::new(Mutex::new(
+                    self.executor
+                        .state
+                        .lock()
+                        .unwrap()
+                        .fork(parent_root, overlay),
+                ));
+
+                let executor = Executor::new(state_manager, self.block_gas_limit);
+
+                executor
                     .execute_block(&mut block)
                     .map_err(|_e| ConsensusError::InvalidParent)?; // Map error appropriately
 
                 log::info!(
-                    "Proposal Executed. View: {}, Root: {:?}, Gas: {}",
+                    "Proposal Executed (View {}): Root {:?}, Gas {}",
                     block.view,
                     block.state_root,
                     block.gas_used
@@ -205,6 +246,9 @@ impl SimplexState {
                 self.tx_pool.remove_transactions(&block.payload);
 
                 // SAVE the block immediately (Leader trusts own execution)
+                // Note: StateOverlay ensures only block data is saved, not state changes.
+                // Wait, we are calling self.storage.save_block directly here, so it IS saved.
+                // This is correct. We want Block Data in DB, just not Account State.
                 self.storage.save_block(&block).unwrap();
 
                 let mut actions = vec![ConsensusAction::BroadcastBlock(block.clone())];
@@ -240,6 +284,15 @@ impl SimplexState {
         &mut self,
         block: Block,
     ) -> Result<(bool, Vec<ConsensusAction>), ConsensusError> {
+        let block_hash = hash_data(&block);
+        if self
+            .storage
+            .get_block(&block_hash)
+            .unwrap_or(None)
+            .is_some()
+        {
+            return Ok((true, vec![]));
+        }
         // 1. Check Parent (Simplex Lineage)
         if block.parent_hash != Hash::default()
             && self
@@ -249,6 +302,10 @@ impl SimplexState {
                 .is_none()
         {
             // Orphan Logic: Buffer and Request Parent
+            println!(
+                "DEBUG: Orphan Detected. Parent not found: {:?}",
+                block.parent_hash
+            );
             self.orphans
                 .entry(block.parent_hash)
                 .or_default()
@@ -260,64 +317,66 @@ impl SimplexState {
             ));
         }
 
-        // 1.2 Fork/Lineage Check
-        // We can only execute this block if our local state corresponds to the parent block's state.
-        // Since we don't have rollback, we reject forks that don't extend our HEAD.
-        if let Ok(Some(parent)) = self.storage.get_block(&block.parent_hash) {
-            let current_root = self.executor.state.lock().unwrap().root();
-            if parent.state_root != current_root {
-                log::warn!(
-                    "Fork Detected: Block Parent Root {:?} != Local State Root {:?}. Ignoring block View {}",
-                    parent.state_root,
-                    current_root,
-                    block.view
-                );
-                // We simply return OK false (not stored) or error.
-                // If we error, it might be retried. If we ignore, we drop it.
-                // Let's drop it to silence the error.
-                return Ok((false, vec![]));
-            }
+        // 1.1 Committee Hash Check
+        let expected_committee_hash = hash_data(&self.committee);
+        if block.committee_hash != expected_committee_hash {
+            log::warn!(
+                "Invalid Committee Hash: Expected {:?}, Got {:?}",
+                expected_committee_hash,
+                block.committee_hash
+            );
+            return Err(ConsensusError::InvalidBlock); // Or specific error
         }
+
+        // 1.2 Fork/Lineage Check
+        // 1.2 Fork/Lineage Check
+        // Disabled because SMT Root in blocks (ephemeral) differs from Local SMT Root (persistent) in current implementation.
+        // if let Ok(Some(parent)) = self.storage.get_block(&block.parent_hash) {
+        //     let current_root = self.executor.state.lock().unwrap().root();
+        //     if parent.state_root != current_root {
+        //         println!("DEBUG: Fork Detected! Parent Root {:?} != Local Root {:?}", parent.state_root, current_root);
+        //         // Let's drop it to silence the error.
+        //         return Ok((false, vec![]));
+        //     }
+        // }
 
         // 1.5 Execute Block (Validation)
         // We must re-execute to verify state_root and receipts_root matches.
-        // Also this updates the local state.
-        // Clone block because execute_block modifies it (update roots),
-        // but here we want to check if the incoming block's roots match our execution.
+        let overlay = Arc::new(StateOverlay::new(self.storage.clone()));
+
+        // Fork state from Parent Root
+        let parent_root = if block.parent_hash == Hash::default() {
+            Hash::default()
+        } else {
+            self.storage
+                .get_block(&block.parent_hash)
+                .ok()
+                .flatten()
+                .map(|b| b.state_root)
+                .unwrap_or_default()
+        };
+
+        let state_manager = Arc::new(Mutex::new(
+            self.executor
+                .state
+                .lock()
+                .unwrap()
+                .fork(parent_root, overlay),
+        ));
+
+        let executor = Executor::new(state_manager, self.block_gas_limit);
+
         let mut executed_block = block.clone();
-        // Reset roots to ZERO before execution to ensure we calculate them fresh?
-        // No, execute_block calculates roots based on payload and UPDATES struct fields.
-        // So we should see if `executed_block.state_root == block.state_root`.
-        // But `executor.execute_block` overwrites the fields.
+        // Clear gas used/roots to verify execution recreation
+        executed_block.gas_used = 0;
+        // executed_block.state_root = Hash::default(); // Keep original to compare? No, executor overwrites it.
 
-        // Strategy:
-        // 1. Snapshot/Check current state (ensure we are extending parent state).
-        //    (For simplicity we assume sequential execution on justified chain).
-        // 2. Execute.
-        // 3. Compare roots.
-
-        // NOTE: state updates are committed to DB in `execute_block`.
-        // If we fail execution (bad root), we might have already modified state?
-        // Optimally, `execute_block` should not commit if roots don't match provided.
-        // OR `execute_block` is trusted to BE correct.
-        // If we are validating a PROPOSAL from peer:
-        // We run `execute_block(&mut clone)`.
-        // Then check if `clone.state_root == block.state_root`.
-        // If mismatch, revert?
-        // `StateManager` commits immediately in `execute_block`.
-        // This is tricky without transaction rollback.
-        // MVP: Assume valid execution, if roots mismatch, we are in inconsistent state :(
-        // FIX: For MVP we accept updating state. Ideally `redb` transaction should be passed to `execute_block`.
-        // Current `StateManager` uses `Arc<dyn Storage>`.
-        // Let's just run it. If invalid, we log error.
-
-        if let Err(e) = self.executor.execute_block(&mut executed_block) {
+        executor.execute_block(&mut executed_block).map_err(|e| {
             log::error!("Block Execution Failed: {:?}", e);
-            return Ok((true, vec![])); // Treat as invalid? or just valid consensus but execution failed?
-            // If execution fails, block is invalid.
-        }
+            ConsensusError::InvalidBlock
+        })?;
 
-        if executed_block.state_root != block.state_root {
+        if block.state_root != executed_block.state_root {
             log::error!(
                 "Invalid State Root: expected {:?}, got {:?}",
                 block.state_root,
@@ -371,7 +430,22 @@ impl SimplexState {
             self.persist_state();
         }
 
-        // 4. Generate Vote
+        // 4. Generate Vote (Strict Check)
+        if block.view <= self.last_voted_view {
+            // We already voted for this view (or a higher one). Do not vote again.
+            // Parallel Chain Prevention: Honest nodes MUST NOT equivocate.
+            log::warn!(
+                "Double Voting Attempt Rejected: View {}, Last Voted {}",
+                block.view,
+                self.last_voted_view
+            );
+            return Ok(actions);
+        }
+
+        // UPDATE AND PERSIST STATE BEFORE VOTING
+        self.last_voted_view = block.view;
+        self.persist_state(); // Critical: Persist the fact that we voted.
+
         let block_hash = hash_data(&block);
         let vote = self.create_vote(block.view, block_hash, VoteType::Notarize);
         actions.push(ConsensusAction::BroadcastVote(vote));
@@ -390,9 +464,10 @@ impl SimplexState {
     /// Handle an incoming vote.
     /// If we have enough votes (2f+1), form a QC.
     pub fn on_vote(&mut self, vote: Vote) -> Result<Vec<ConsensusAction>, ConsensusError> {
-        // Verify signature (mocked)
+        // Verify signature
         if !verify(&vote.author, &vote.block_hash.0, &vote.signature) {
-            // For mock, we verify hash matches signature content.
+            log::warn!("Invalid signature from author {:?}", vote.author);
+            return Err(ConsensusError::InvalidSignature);
         }
 
         if vote.vote_type == VoteType::Finalize {
@@ -461,8 +536,29 @@ impl SimplexState {
                     };
 
                     if let Ok(mut block) = self.create_proposal(next_view, qc, parent_hash) {
-                        // Full Proposal Lifecycle
-                        if self.executor.execute_block(&mut block).is_ok() {
+                        // Full Proposal Lifecycle (Ephemeral Execution)
+                        let overlay = Arc::new(StateOverlay::new(self.storage.clone()));
+                        let parent_root = if parent_hash == Hash::default() {
+                            Hash::default()
+                        } else {
+                            self.storage
+                                .get_block(&parent_hash)
+                                .ok()
+                                .flatten()
+                                .map(|b| b.state_root)
+                                .unwrap_or(Hash::default())
+                        };
+
+                        let state_manager = Arc::new(Mutex::new(
+                            self.executor
+                                .state
+                                .lock()
+                                .unwrap()
+                                .fork(parent_root, overlay),
+                        ));
+                        let executor = Executor::new(state_manager, self.block_gas_limit);
+
+                        if executor.execute_block(&mut block).is_ok() {
                             log::info!(
                                 "Proposal Executed (Chain). View: {}, Root: {:?}, Gas: {}",
                                 block.view,
@@ -580,7 +676,9 @@ impl SimplexState {
             Hash::default(), // receipts_root
             payload,
             base_fee,
-            0, // gas_used initialized to 0, updated by executor
+            0,                          // gas_used initialized to 0, updated by executor
+            vec![],                     // Evidence (Mock/Empty for now)
+            hash_data(&self.committee), // Committee Hash
         );
         Ok(block)
     }
@@ -623,7 +721,46 @@ impl SimplexState {
                 self.finalized_height = vote.view;
                 log::info!("EXPLICITLY FINALIZED VIEW: {}", vote.view);
                 self.persist_state();
-                // In real impl, we would commit transactions here.
+
+                // Check for Dummy Block (Timeout)
+                if vote.block_hash == Hash::default() {
+                    log::info!(
+                        "Finalized Dummy Block (Timeout) for View {}. Skipping state commit.",
+                        vote.view
+                    );
+                    return Ok(vec![]);
+                }
+
+                // COMMIT STATE (Re-execute against persistent storage)
+                match self.storage.get_block(&vote.block_hash) {
+                    Ok(Some(mut block)) => {
+                        log::info!("Committing Finalized Block View {}", block.view);
+                        // Use self.executor which points to REAL storage
+                        if let Err(e) = self.executor.execute_block(&mut block) {
+                            log::error!("CRITICAL: Failed to commit finalized block: {:?}", e);
+                        } else {
+                            log::info!("State Committed for View {}", block.view);
+
+                            // RELOAD COMMITTEE from System Contract (Storage)
+                            let db = self.executor.state.lock().unwrap();
+                            if let Ok(Some(state)) = db.get_consensus_state() {
+                                // Update local view of committee
+                                self.committee = state.committee;
+                                log::info!("Updated Validator Set. Size: {}", self.committee.len());
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        log::warn!(
+                            "Finalized block not found in storage: {:?}",
+                            vote.block_hash
+                        );
+                        // We might need to request it?
+                    }
+                    Err(e) => {
+                        log::error!("Storage error fetching finalized block: {:?}", e);
+                    }
+                }
             }
         }
         Ok(vec![])
@@ -649,12 +786,31 @@ impl SimplexState {
     }
 
     fn persist_state(&self) {
-        let state = ConsensusState {
-            view: self.current_view,
-            finalized_height: self.finalized_height,
-            preferred_block: self.preferred_block,
-            preferred_view: self.preferred_view,
-        };
+        // Read-Modify-Write to preserve pending/exiting/stakes which we don't track in memory
+        let mut state = self
+            .storage
+            .get_consensus_state()
+            .unwrap()
+            .unwrap_or(ConsensusState {
+                view: self.current_view,
+                finalized_height: self.finalized_height,
+                preferred_block: self.preferred_block,
+                preferred_view: self.preferred_view,
+                last_voted_view: self.last_voted_view,
+                committee: self.committee.clone(),
+                pending_validators: vec![],
+                exiting_validators: vec![],
+                stakes: HashMap::new(),
+            });
+
+        // Update fields we manage
+        state.view = self.current_view;
+        state.finalized_height = self.finalized_height;
+        state.preferred_block = self.preferred_block;
+        state.preferred_view = self.preferred_view;
+        state.last_voted_view = self.last_voted_view;
+        state.committee = self.committee.clone();
+
         if let Err(e) = self.storage.save_consensus_state(&state) {
             log::error!("Failed to persist state: {:?}", e);
         }

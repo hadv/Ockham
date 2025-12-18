@@ -28,7 +28,7 @@ fn test_redb_persistence() {
         let storage = std::sync::Arc::new(RedbStorage::new(db_path).unwrap());
         let tx_pool = std::sync::Arc::new(ockham::tx_pool::TxPool::new(storage.clone()));
         let state_manager = std::sync::Arc::new(std::sync::Mutex::new(
-            ockham::state::StateManager::new(storage.clone()),
+            ockham::state::StateManager::new(storage.clone(), None),
         ));
         let executor = ockham::vm::Executor::new(
             state_manager.clone(),
@@ -55,7 +55,7 @@ fn test_redb_persistence() {
         let storage = std::sync::Arc::new(RedbStorage::new(db_path).unwrap());
         let tx_pool = std::sync::Arc::new(ockham::tx_pool::TxPool::new(storage.clone()));
         let state_manager = std::sync::Arc::new(std::sync::Mutex::new(
-            ockham::state::StateManager::new(storage.clone()),
+            ockham::state::StateManager::new(storage.clone(), None),
         ));
         let executor = ockham::vm::Executor::new(
             state_manager.clone(),

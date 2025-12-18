@@ -82,6 +82,10 @@ pub struct Block {
     // EIP-1559
     pub base_fee_per_gas: U256,
     pub gas_used: u64,
+
+    // On-Chain Committee
+    pub evidence: Vec<EquivocationEvidence>,
+    pub committee_hash: Hash, // Hash of the active committee for this view
 }
 
 impl Block {
@@ -96,6 +100,8 @@ impl Block {
         payload: Vec<Transaction>,
         base_fee_per_gas: U256,
         gas_used: u64,
+        evidence: Vec<EquivocationEvidence>,
+        committee_hash: Hash,
     ) -> Self {
         Self {
             author,
@@ -108,6 +114,8 @@ impl Block {
             is_dummy: false,
             base_fee_per_gas,
             gas_used,
+            evidence,
+            committee_hash,
         }
     }
 
@@ -128,6 +136,8 @@ impl Block {
             is_dummy: true,
             base_fee_per_gas: U256::from(INITIAL_BASE_FEE), // Default base fee for dummy
             gas_used: 0,
+            evidence: vec![],
+            committee_hash: Hash::default(),
         }
     }
 }
@@ -139,9 +149,16 @@ pub enum VoteType {
     Finalize,
 }
 
+/// Evidence of double-voting (Equivocation)
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EquivocationEvidence {
+    pub vote_a: Vote,
+    pub vote_b: Vote,
+}
+
 /// A Vote from a validator for a specific block (Notarization) or view (Finalization/Timeout).
 /// In Simplex, a timeout creates a vote for a "Dummy Block" (Notarize ZeroHash).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Vote {
     pub view: View,
     pub block_hash: Hash,    // The block being voted for (or ZeroHash/DummyHash)

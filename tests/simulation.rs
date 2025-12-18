@@ -19,7 +19,7 @@ fn test_three_chain_commit() {
             // Create individual tx pool and executor for each node
             let tx_pool = std::sync::Arc::new(ockham::tx_pool::TxPool::new(storage.clone()));
             let state_manager = std::sync::Arc::new(std::sync::Mutex::new(
-                ockham::state::StateManager::new(storage.clone()),
+                ockham::state::StateManager::new(storage.clone(), None),
             ));
             let executor = ockham::vm::Executor::new(
                 state_manager.clone(),
@@ -54,6 +54,8 @@ fn test_three_chain_commit() {
         vec![],
         ockham::types::U256::ZERO,
         0,
+        vec![],
+        hash_data(&committee),
     );
     let b1_hash = hash_data(&b1);
 
@@ -125,6 +127,8 @@ fn test_three_chain_commit() {
         vec![],
         ockham::types::U256::ZERO,
         0,
+        vec![],
+        hash_data(&committee),
     );
     let b2_hash = hash_data(&b2);
 

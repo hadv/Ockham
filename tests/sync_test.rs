@@ -4,7 +4,13 @@ use ockham::storage::MemStorage;
 use ockham::types::{Block, QuorumCertificate};
 
 /// Helper to create a signed block
-fn create_block(author_id: u64, view: u64, parent_hash: Hash, justify: QuorumCertificate) -> Block {
+fn create_block(
+    author_id: u64,
+    view: u64,
+    parent_hash: Hash,
+    justify: QuorumCertificate,
+    committee_hash: Hash,
+) -> Block {
     let (pk, _) = generate_keypair_from_id(author_id);
     Block::new(
         pk,
@@ -16,6 +22,8 @@ fn create_block(author_id: u64, view: u64, parent_hash: Hash, justify: QuorumCer
         vec![],
         ockham::types::U256::ZERO,
         0,
+        vec![], // Evidence
+        committee_hash,
     )
 }
 
@@ -29,7 +37,7 @@ fn test_sync_orphan_processing() {
     let storage = std::sync::Arc::new(MemStorage::new());
     let tx_pool = std::sync::Arc::new(ockham::tx_pool::TxPool::new(storage.clone()));
     let state_manager = std::sync::Arc::new(std::sync::Mutex::new(
-        ockham::state::StateManager::new(storage.clone()),
+        ockham::state::StateManager::new(storage.clone(), None),
     ));
     let executor = ockham::vm::Executor::new(
         state_manager.clone(),
@@ -38,7 +46,7 @@ fn test_sync_orphan_processing() {
     let mut bob = SimplexState::new(
         bob_pk,
         bob_sk,
-        committee,
+        committee.clone(),
         storage,
         tx_pool,
         executor,
@@ -50,7 +58,13 @@ fn test_sync_orphan_processing() {
     let genesis_qc = QuorumCertificate::default(); // Simplified for test
 
     // Block 1 (View 1)
-    let b1 = create_block(0, 1, genesis_hash, genesis_qc.clone());
+    let b1 = create_block(
+        0,
+        1,
+        genesis_hash,
+        genesis_qc.clone(),
+        hash_data(&committee),
+    );
     let b1_hash = hash_data(&b1);
 
     // Create valid QC for B1
@@ -63,7 +77,7 @@ fn test_sync_orphan_processing() {
     };
 
     // Block 2 (View 2)
-    let b2 = create_block(0, 2, b1_hash, qc1.clone());
+    let b2 = create_block(0, 2, b1_hash, qc1.clone(), hash_data(&committee));
     let b2_hash = hash_data(&b2);
 
     // Create valid QC for B2
@@ -76,7 +90,7 @@ fn test_sync_orphan_processing() {
     };
 
     // Block 3 (View 3)
-    let b3 = create_block(0, 3, b2_hash, qc2.clone());
+    let b3 = create_block(0, 3, b2_hash, qc2.clone(), hash_data(&committee));
 
     // --- SCENARIO: Bob receives B3 first (gap) ---
     println!("Feeding Block 3 to Bob (Orphan)...");
@@ -137,7 +151,7 @@ fn test_sync_block_serving() {
     let storage = std::sync::Arc::new(MemStorage::new());
     let tx_pool = std::sync::Arc::new(ockham::tx_pool::TxPool::new(storage.clone()));
     let state_manager = std::sync::Arc::new(std::sync::Mutex::new(
-        ockham::state::StateManager::new(storage.clone()),
+        ockham::state::StateManager::new(storage.clone(), None),
     ));
     let executor = ockham::vm::Executor::new(
         state_manager.clone(),
@@ -146,7 +160,7 @@ fn test_sync_block_serving() {
     let alice = SimplexState::new(
         alice_pk.clone(),
         alice_sk,
-        committee,
+        committee.clone(),
         storage,
         tx_pool,
         executor,
@@ -155,7 +169,13 @@ fn test_sync_block_serving() {
 
     // Create a block and save it
     let genesis_qc = QuorumCertificate::default();
-    let b1 = create_block(0, 1, alice.preferred_block, genesis_qc);
+    let b1 = create_block(
+        0,
+        1,
+        alice.preferred_block,
+        genesis_qc,
+        hash_data(&committee),
+    );
     let b1_hash = hash_data(&b1);
     alice.storage.save_block(&b1).unwrap();
 

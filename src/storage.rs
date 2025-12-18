@@ -1,4 +1,4 @@
-use crate::crypto::Hash;
+use crate::crypto::{Hash, PublicKey};
 use crate::types::{Address, Block, QuorumCertificate, View};
 use alloy_primitives::{Bytes, U256};
 use redb::{Database, TableDefinition};
@@ -16,7 +16,8 @@ const TABLE_META: TableDefinition<&str, Vec<u8>> = TableDefinition::new("meta");
 const TABLE_ACCOUNTS: TableDefinition<&[u8; 20], Vec<u8>> = TableDefinition::new("accounts");
 const TABLE_STORAGE: TableDefinition<&[u8], Vec<u8>> = TableDefinition::new("storage"); // Key: Address + StorageKey
 const TABLE_CODE: TableDefinition<&[u8; 32], Vec<u8>> = TableDefinition::new("code");
-const TABLE_SMT_NODES: TableDefinition<&[u8; 32], Vec<u8>> = TableDefinition::new("smt_nodes");
+const TABLE_SMT_LEAVES: TableDefinition<&[u8; 32], Vec<u8>> = TableDefinition::new("smt_leaves");
+const TABLE_SMT_BRANCHES: TableDefinition<&[u8], Vec<u8>> = TableDefinition::new("smt_branches");
 
 #[derive(Error, Debug)]
 pub enum StorageError {
@@ -81,6 +82,11 @@ pub struct ConsensusState {
     pub finalized_height: View,
     pub preferred_block: Hash,
     pub preferred_view: View,
+    pub last_voted_view: View,
+    pub committee: Vec<PublicKey>,
+    pub pending_validators: Vec<(PublicKey, View)>,
+    pub exiting_validators: Vec<(PublicKey, View)>,
+    pub stakes: HashMap<Address, U256>,
 }
 
 /// Account Information stored in the Global State
@@ -126,14 +132,19 @@ pub trait Storage: Send + Sync {
         value: &U256,
     ) -> Result<(), StorageError>;
 
-    // SMT Node Storage (key is node hash, value is serialized node)
-    fn get_smt_node(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StorageError>;
-    fn save_smt_node(&self, hash: &Hash, node: &[u8]) -> Result<(), StorageError>;
+    // SMT Storage
+    fn get_smt_branch(&self, height: u8, node_key: &Hash) -> Result<Option<Vec<u8>>, StorageError>;
+    fn save_smt_branch(&self, height: u8, node_key: &Hash, node: &[u8])
+    -> Result<(), StorageError>;
+    fn get_smt_leaf(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StorageError>;
+    fn save_smt_leaf(&self, hash: &Hash, node: &[u8]) -> Result<(), StorageError>;
 }
 
 // -----------------------------------------------------------------------------
 // In-Memory Storage (for Copy/Clone tests where DB is too heavy or needs paths)
 // -----------------------------------------------------------------------------
+pub type SmtBranchMap = HashMap<(u8, Hash), Vec<u8>>;
+
 #[derive(Clone, Default)]
 pub struct MemStorage {
     blocks: Arc<Mutex<HashMap<Hash, Block>>>,
@@ -143,7 +154,8 @@ pub struct MemStorage {
     accounts: Arc<Mutex<HashMap<Address, AccountInfo>>>,
     code: Arc<Mutex<HashMap<Hash, Bytes>>>,
     storage: Arc<Mutex<HashMap<(Address, U256), U256>>>,
-    smt_nodes: Arc<Mutex<HashMap<Hash, Vec<u8>>>>,
+    smt_leaves: Arc<Mutex<HashMap<Hash, Vec<u8>>>>,
+    smt_branches: Arc<Mutex<SmtBranchMap>>,
 }
 
 impl MemStorage {
@@ -222,12 +234,34 @@ impl Storage for MemStorage {
         Ok(())
     }
 
-    fn get_smt_node(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StorageError> {
-        Ok(self.smt_nodes.lock().unwrap().get(hash).cloned())
+    fn get_smt_branch(&self, height: u8, node_key: &Hash) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(self
+            .smt_branches
+            .lock()
+            .unwrap()
+            .get(&(height, *node_key))
+            .cloned())
     }
 
-    fn save_smt_node(&self, hash: &Hash, node: &[u8]) -> Result<(), StorageError> {
-        self.smt_nodes.lock().unwrap().insert(*hash, node.to_vec());
+    fn save_smt_branch(
+        &self,
+        height: u8,
+        node_key: &Hash,
+        node: &[u8],
+    ) -> Result<(), StorageError> {
+        self.smt_branches
+            .lock()
+            .unwrap()
+            .insert((height, *node_key), node.to_vec());
+        Ok(())
+    }
+
+    fn get_smt_leaf(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(self.smt_leaves.lock().unwrap().get(hash).cloned())
+    }
+
+    fn save_smt_leaf(&self, hash: &Hash, node: &[u8]) -> Result<(), StorageError> {
+        self.smt_leaves.lock().unwrap().insert(*hash, node.to_vec());
         Ok(())
     }
 }
@@ -256,7 +290,8 @@ impl RedbStorage {
             let _ = write_txn.open_table(TABLE_ACCOUNTS)?;
             let _ = write_txn.open_table(TABLE_STORAGE)?;
             let _ = write_txn.open_table(TABLE_CODE)?;
-            let _ = write_txn.open_table(TABLE_SMT_NODES)?;
+            let _ = write_txn.open_table(TABLE_SMT_LEAVES)?;
+            let _ = write_txn.open_table(TABLE_SMT_BRANCHES)?;
         }
         write_txn.commit()?;
         Ok(Self { db })
@@ -414,24 +449,196 @@ impl Storage for RedbStorage {
         Ok(())
     }
 
-    fn get_smt_node(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StorageError> {
+    fn get_smt_branch(&self, height: u8, node_key: &Hash) -> Result<Option<Vec<u8>>, StorageError> {
         let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(TABLE_SMT_NODES)?;
-        if let Some(val) = table.get(&hash.0)? {
-            // SMT nodes are stored as Vec<u8>
+        let table = read_txn.open_table(TABLE_SMT_BRANCHES)?;
+        let mut key = Vec::with_capacity(33);
+        key.push(height);
+        key.extend_from_slice(&node_key.0);
+        if let Some(val) = table.get(key.as_slice())? {
             Ok(Some(val.value().to_vec()))
         } else {
             Ok(None)
         }
     }
 
-    fn save_smt_node(&self, hash: &Hash, node: &[u8]) -> Result<(), StorageError> {
+    fn save_smt_branch(
+        &self,
+        height: u8,
+        node_key: &Hash,
+        node: &[u8],
+    ) -> Result<(), StorageError> {
         let write_txn = self.db.begin_write()?;
         {
-            let mut table = write_txn.open_table(TABLE_SMT_NODES)?;
+            let mut table = write_txn.open_table(TABLE_SMT_BRANCHES)?;
+            let mut key = Vec::with_capacity(33);
+            key.push(height);
+            key.extend_from_slice(&node_key.0);
+            table.insert(key.as_slice(), node.to_vec())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    fn get_smt_leaf(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TABLE_SMT_LEAVES)?;
+        if let Some(val) = table.get(&hash.0)? {
+            Ok(Some(val.value().to_vec()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn save_smt_leaf(&self, hash: &Hash, node: &[u8]) -> Result<(), StorageError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(TABLE_SMT_LEAVES)?;
             table.insert(&hash.0, node.to_vec())?;
         }
         write_txn.commit()?;
+        Ok(())
+    }
+}
+
+// -----------------------------------------------------------------------------
+// State Overlay (In-Memory Sandbox for Validation)
+// -----------------------------------------------------------------------------
+pub struct StateOverlay {
+    inner: Arc<dyn Storage>,
+    // Overlay Cache
+    accounts: Arc<Mutex<HashMap<Address, AccountInfo>>>,
+    storage: Arc<Mutex<HashMap<(Address, U256), U256>>>,
+    code: Arc<Mutex<HashMap<Hash, Bytes>>>,
+    smt_leaves: Arc<Mutex<HashMap<Hash, Vec<u8>>>>,
+    smt_branches: Arc<Mutex<SmtBranchMap>>,
+}
+
+impl StateOverlay {
+    pub fn new(inner: Arc<dyn Storage>) -> Self {
+        Self {
+            inner,
+            accounts: Arc::new(Mutex::new(HashMap::new())),
+            storage: Arc::new(Mutex::new(HashMap::new())),
+            code: Arc::new(Mutex::new(HashMap::new())),
+            smt_leaves: Arc::new(Mutex::new(HashMap::new())),
+            smt_branches: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl Storage for StateOverlay {
+    fn save_block(&self, _block: &Block) -> Result<(), StorageError> {
+        // We typically don't need to save blocks in overlay during execution,
+        // but if validation needs to save it to be read back?
+        // SimplexState::validate_and_store_block saves it.
+        // But for validation we might just keep it in memory?
+        // Let's pass through to inner? NO. Inner is persistent.
+        // We should PROHIBIT saving blocks to persistent DB via overlay?
+        // OR we just use a MemStorage for blocks in Overlay?
+        // For this refactor, we are mostly concerned with STATE (Accounts/Storage).
+        // Let's just error or ignore?
+        // Actually, validate_and_store_block calls save_block.
+        // If we use Overlay, we don't want to save to DB.
+        // So we should mock it or ignore it.
+        Ok(())
+    }
+
+    fn get_block(&self, hash: &Hash) -> Result<Option<Block>, StorageError> {
+        self.inner.get_block(hash)
+    }
+
+    fn save_qc(&self, _qc: &QuorumCertificate) -> Result<(), StorageError> {
+        // Overlay shouldn't be saving QCs usually, but if it does, ignore/mock.
+        Ok(())
+    }
+
+    fn get_qc(&self, view: View) -> Result<Option<QuorumCertificate>, StorageError> {
+        self.inner.get_qc(view)
+    }
+
+    fn save_consensus_state(&self, _state: &ConsensusState) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    fn get_consensus_state(&self) -> Result<Option<ConsensusState>, StorageError> {
+        self.inner.get_consensus_state()
+    }
+
+    // EVM State - Check Overlay First
+    fn get_account(&self, address: &Address) -> Result<Option<AccountInfo>, StorageError> {
+        if let Some(info) = self.accounts.lock().unwrap().get(address) {
+            return Ok(Some(info.clone()));
+        }
+        self.inner.get_account(address)
+    }
+
+    fn save_account(&self, address: &Address, info: &AccountInfo) -> Result<(), StorageError> {
+        self.accounts.lock().unwrap().insert(*address, info.clone());
+        Ok(())
+    }
+
+    fn get_code(&self, hash: &Hash) -> Result<Option<Bytes>, StorageError> {
+        if let Some(code) = self.code.lock().unwrap().get(hash) {
+            return Ok(Some(code.clone()));
+        }
+        self.inner.get_code(hash)
+    }
+
+    fn save_code(&self, hash: &Hash, code: &Bytes) -> Result<(), StorageError> {
+        self.code.lock().unwrap().insert(*hash, code.clone());
+        Ok(())
+    }
+
+    fn get_storage(&self, address: &Address, index: &U256) -> Result<U256, StorageError> {
+        if let Some(val) = self.storage.lock().unwrap().get(&(*address, *index)) {
+            return Ok(*val);
+        }
+        self.inner.get_storage(address, index)
+    }
+
+    fn save_storage(
+        &self,
+        address: &Address,
+        index: &U256,
+        value: &U256,
+    ) -> Result<(), StorageError> {
+        self.storage
+            .lock()
+            .unwrap()
+            .insert((*address, *index), *value);
+        Ok(())
+    }
+
+    fn get_smt_branch(&self, height: u8, node_key: &Hash) -> Result<Option<Vec<u8>>, StorageError> {
+        if let Some(node) = self.smt_branches.lock().unwrap().get(&(height, *node_key)) {
+            return Ok(Some(node.clone()));
+        }
+        self.inner.get_smt_branch(height, node_key)
+    }
+
+    fn save_smt_branch(
+        &self,
+        height: u8,
+        node_key: &Hash,
+        node: &[u8],
+    ) -> Result<(), StorageError> {
+        self.smt_branches
+            .lock()
+            .unwrap()
+            .insert((height, *node_key), node.to_vec());
+        Ok(())
+    }
+
+    fn get_smt_leaf(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StorageError> {
+        if let Some(node) = self.smt_leaves.lock().unwrap().get(hash) {
+            return Ok(Some(node.clone()));
+        }
+        self.inner.get_smt_leaf(hash)
+    }
+
+    fn save_smt_leaf(&self, hash: &Hash, node: &[u8]) -> Result<(), StorageError> {
+        self.smt_leaves.lock().unwrap().insert(*hash, node.to_vec());
         Ok(())
     }
 }
