@@ -2,9 +2,12 @@ use crate::crypto::{
     Hash, PrivateKey, PublicKey, aggregate, hash_data, sign, verify, verify_aggregate,
 };
 
+use crate::evidence_pool::EvidencePool;
 use crate::storage::{ConsensusState, StateOverlay, Storage};
 use crate::tx_pool::TxPool;
-use crate::types::{Block, INITIAL_BASE_FEE, QuorumCertificate, U256, View, Vote, VoteType};
+use crate::types::{
+    Block, EquivocationEvidence, INITIAL_BASE_FEE, QuorumCertificate, U256, View, Vote, VoteType,
+};
 use crate::vm::Executor;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -35,6 +38,7 @@ pub enum ConsensusError {
 #[derive(Debug, Clone)]
 pub enum ConsensusAction {
     BroadcastVote(Vote),
+    BroadcastEvidence(EquivocationEvidence),
     BroadcastBlock(Block),
     // Sync Actions
     BroadcastRequest(Hash),
@@ -65,6 +69,9 @@ pub struct SimplexState {
     // Sync: Orphan Buffer
     // Map: ParentHash -> List of Orphan Blocks waiting for that parent
     pub orphans: HashMap<Hash, Vec<Block>>,
+
+    // Slashing
+    pub evidence_pool: EvidencePool,
 
     // Execution & P2P
     pub tx_pool: Arc<TxPool>,
@@ -108,6 +115,7 @@ impl SimplexState {
                 votes_received: HashMap::new(),
                 finalize_votes_received: HashMap::new(),
                 orphans: HashMap::new(),
+                evidence_pool: EvidencePool::new(),
                 tx_pool,
                 executor,
                 block_gas_limit: crate::types::DEFAULT_BLOCK_GAS_LIMIT,
@@ -179,6 +187,7 @@ impl SimplexState {
             votes_received: HashMap::new(),
             finalize_votes_received: HashMap::new(),
             orphans: HashMap::new(),
+            evidence_pool: EvidencePool::new(),
             tx_pool,
             executor,
             block_gas_limit,
@@ -250,6 +259,10 @@ impl SimplexState {
                 // Wait, we are calling self.storage.save_block directly here, so it IS saved.
                 // This is correct. We want Block Data in DB, just not Account State.
                 self.storage.save_block(&block).unwrap();
+
+                // Remove included evidence from pool
+                let evidence_in_block = block.evidence.clone();
+                self.evidence_pool.remove_evidence(&evidence_in_block);
 
                 let mut actions = vec![ConsensusAction::BroadcastBlock(block.clone())];
 
@@ -407,6 +420,9 @@ impl SimplexState {
         // Remove transactions included in this valid block from our pool
         self.tx_pool.remove_transactions(&block.payload);
 
+        // Remove included evidence from pool (if any)
+        self.evidence_pool.remove_evidence(&block.evidence);
+
         Ok((true, vec![]))
     }
 
@@ -475,6 +491,29 @@ impl SimplexState {
         }
 
         let view_votes = self.votes_received.entry(vote.view).or_default();
+
+        // 0. Equivocation Check
+        // 0. Equivocation Check
+        if let Some(existing_vote) = view_votes.get(&vote.author)
+            && existing_vote.block_hash != vote.block_hash
+        {
+            log::warn!(
+                "Equivocation Detected from {:?} in View {}",
+                vote.author,
+                vote.view
+            );
+            let evidence = EquivocationEvidence {
+                vote_a: existing_vote.clone(),
+                vote_b: vote.clone(),
+            };
+            // Add to pool and broadcast
+            if self.evidence_pool.add_evidence(evidence.clone()) {
+                return Ok(vec![ConsensusAction::BroadcastEvidence(evidence)]);
+            } else {
+                return Ok(vec![]);
+            }
+        }
+
         view_votes.insert(vote.author.clone(), vote.clone());
 
         let threshold = (self.committee.len() * 2) / 3 + 1;
@@ -676,9 +715,9 @@ impl SimplexState {
             Hash::default(), // receipts_root
             payload,
             base_fee,
-            0,                          // gas_used initialized to 0, updated by executor
-            vec![],                     // Evidence (Mock/Empty for now)
-            hash_data(&self.committee), // Committee Hash
+            0,                            // gas_used initialized to 0, updated by executor
+            self.evidence_pool.get_all(), // Include all pending evidence
+            hash_data(&self.committee),   // Committee Hash
         );
         Ok(block)
     }

@@ -151,6 +151,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                  while let Some(action) = queue.pop() {
                                      match action {
                                          ConsensusAction::BroadcastVote(vote) => { network.broadcast_vote(vote).await; }
+                                         ConsensusAction::BroadcastEvidence(evidence) => { network.broadcast_evidence(evidence).await; }
                                          ConsensusAction::BroadcastBlock(block) => {
                                              log::info!("Broadcasting Block: {:?}", block);
                                              network.broadcast_block(block.clone()).await;
@@ -179,6 +180,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 state.on_block_response(*block)
                             }
                         }
+                    }
+                    NetworkEvent::EvidenceReceived(evidence) => {
+                        log::info!("Received Equivocation Evidence");
+                        if state.evidence_pool.add_evidence(evidence) {
+                            log::warn!("New Evidence Added to Pool");
+                        }
+                        Ok(vec![])
                     }
                     NetworkEvent::TransactionReceived(tx) => {
                         log::info!("Received Transaction from {:?}", tx.public_key);
@@ -209,6 +217,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                              }
                                              action_queue.extend(new_actions);
                                          }
+                                     }
+                                     ConsensusAction::BroadcastEvidence(evidence) => {
+                                         network.broadcast_evidence(evidence).await;
                                      }
                                      ConsensusAction::BroadcastBlock(block) => {
                                          log::info!("Broadcasting Block: {:?}", block);
@@ -252,6 +263,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                          }
                                          action_queue.extend(new_actions);
                                      }
+                                 }
+                                 ConsensusAction::BroadcastEvidence(evidence) => {
+                                     network.broadcast_evidence(evidence).await;
                                  }
                                  ConsensusAction::BroadcastBlock(block) => {
                                      log::info!("Broadcasting Block: {:?}", block);

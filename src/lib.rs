@@ -1,6 +1,7 @@
 pub mod client;
 pub mod consensus;
 pub mod crypto;
+pub mod evidence_pool;
 pub mod network;
 pub mod rpc;
 pub mod state;
