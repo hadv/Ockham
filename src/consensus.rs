@@ -619,6 +619,10 @@ impl SimplexState {
 
                             actions.push(ConsensusAction::BroadcastBlock(block.clone()));
 
+                            // Update last_voted_view to prevent double voting via on_proposal reflection
+                            self.last_voted_view = block.view;
+                            self.persist_state();
+
                             // Vote for own block
                             let block_hash = hash_data(&block);
                             let vote = self.create_vote(block.view, block_hash, VoteType::Notarize);

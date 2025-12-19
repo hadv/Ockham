@@ -8,3 +8,4 @@
 - [x] Verify both slashing mechanisms with tests
 - [x] Fix "no stake entry" warning in `test_failure.sh`
 - [x] Fix flaky `test_failure.sh` logging check
+- [x] Fix `try_propose` leader self-equivocation bug
