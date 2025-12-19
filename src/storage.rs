@@ -87,6 +87,7 @@ pub struct ConsensusState {
     pub pending_validators: Vec<(PublicKey, View)>,
     pub exiting_validators: Vec<(PublicKey, View)>,
     pub stakes: HashMap<Address, U256>,
+    pub inactivity_scores: HashMap<PublicKey, u64>,
 }
 
 /// Account Information stored in the Global State

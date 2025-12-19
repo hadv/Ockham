@@ -146,6 +146,14 @@ impl SimplexState {
         // but let's save genesis as the "default" block.
         storage.save_qc(&genesis_qc).unwrap();
 
+        let mut initial_stakes = HashMap::new();
+        for pk in &committee {
+            let pk_bytes = pk.0.to_bytes();
+            let hash = crate::types::keccak256(pk_bytes);
+            let address = crate::types::Address::from_slice(&hash[12..]);
+            initial_stakes.insert(address, crate::types::U256::from(5000u64));
+        }
+
         let initial_state = ConsensusState {
             view: 1,
             finalized_height: 0,
@@ -155,7 +163,8 @@ impl SimplexState {
             committee: committee.clone(),
             pending_validators: vec![],
             exiting_validators: vec![],
-            stakes: HashMap::new(),
+            stakes: initial_stakes,
+            inactivity_scores: HashMap::new(),
         };
         storage.save_consensus_state(&initial_state).unwrap();
 
@@ -496,6 +505,8 @@ impl SimplexState {
         // 0. Equivocation Check
         if let Some(existing_vote) = view_votes.get(&vote.author)
             && existing_vote.block_hash != vote.block_hash
+            && existing_vote.block_hash != Hash::default()
+            && vote.block_hash != Hash::default()
         {
             log::warn!(
                 "Equivocation Detected from {:?} in View {}",
@@ -609,6 +620,10 @@ impl SimplexState {
                             self.storage.save_block(&block).unwrap();
 
                             actions.push(ConsensusAction::BroadcastBlock(block.clone()));
+
+                            // Update last_voted_view to prevent double voting via on_proposal reflection
+                            self.last_voted_view = block.view;
+                            self.persist_state();
 
                             // Vote for own block
                             let block_hash = hash_data(&block);
@@ -830,16 +845,26 @@ impl SimplexState {
             .storage
             .get_consensus_state()
             .unwrap()
-            .unwrap_or(ConsensusState {
-                view: self.current_view,
-                finalized_height: self.finalized_height,
-                preferred_block: self.preferred_block,
-                preferred_view: self.preferred_view,
-                last_voted_view: self.last_voted_view,
-                committee: self.committee.clone(),
-                pending_validators: vec![],
-                exiting_validators: vec![],
-                stakes: HashMap::new(),
+            .unwrap_or_else(|| {
+                let mut stakes = HashMap::new();
+                for pk in &self.committee {
+                    let pk_bytes = pk.0.to_bytes();
+                    let hash = crate::types::keccak256(pk_bytes);
+                    let address = crate::types::Address::from_slice(&hash[12..]);
+                    stakes.insert(address, crate::types::U256::from(5000u64));
+                }
+                ConsensusState {
+                    view: self.current_view,
+                    finalized_height: self.finalized_height,
+                    preferred_block: self.preferred_block,
+                    preferred_view: self.preferred_view,
+                    last_voted_view: self.last_voted_view,
+                    committee: self.committee.clone(),
+                    pending_validators: vec![],
+                    exiting_validators: vec![],
+                    stakes,
+                    inactivity_scores: HashMap::new(),
+                }
             });
 
         // Update fields we manage

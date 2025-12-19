@@ -19,6 +19,7 @@ async fn test_rpc_get_status() {
         pending_validators: vec![],
         exiting_validators: vec![],
         stakes: HashMap::new(),
+        inactivity_scores: HashMap::new(),
     };
     storage.save_consensus_state(&state).unwrap();
 
@@ -76,6 +77,7 @@ async fn test_rpc_get_block() {
         pending_validators: vec![],
         exiting_validators: vec![],
         stakes: HashMap::new(),
+        inactivity_scores: HashMap::new(),
     };
     storage.save_consensus_state(&state).unwrap();
 

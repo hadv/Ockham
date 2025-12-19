@@ -4,3 +4,8 @@ node*.log
 discussion.json
 
 db/
+
+task.md
+implementation_plan.md
+github_issue_summary.md
+walkthrough.md

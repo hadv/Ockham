@@ -58,6 +58,14 @@ fn test_slashing_flow() {
         ockham::types::DEFAULT_BLOCK_GAS_LIMIT,
     );
 
+    // Initialize Stakes for Offender
+    {
+        let mut db = state_manager.lock().unwrap();
+        let mut state = db.get_consensus_state().unwrap().unwrap();
+        state.stakes.insert(offender_addr, U256::from(5000u64));
+        db.save_consensus_state(&state).unwrap();
+    }
+
     // 2. Create Equivocation Votes (View 2)
     let view = 2;
     let block_a_hash = Hash([1u8; 32]);
@@ -168,16 +176,13 @@ fn test_slashing_flow() {
 
     executor.execute_block(&mut block_to_exec).unwrap();
 
-    // Check balance
+    // Check Stake
     let mut db = validator.executor.state.lock().unwrap();
-    let account = db.basic(offender_addr).unwrap().unwrap();
+    let state = db.get_consensus_state().unwrap().unwrap();
+    let stake = state.stakes.get(&offender_addr).unwrap();
 
     // Slashed amount is 1000. Initial 5000. Should be 4000.
-    assert_eq!(
-        account.balance,
-        U256::from(4000u64),
-        "Balance should be slashed"
-    );
+    assert_eq!(*stake, U256::from(4000u64), "Stake should be slashed");
 
     println!("Slashing Test Passed!");
 }
