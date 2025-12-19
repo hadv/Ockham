@@ -1,0 +1,8 @@
+# Slashing Refactor Task List
+
+- [x] Refactor Liveness Slashing to target `stakes`
+- [x] Refactor Equivocation Slashing (Duplicate Vote) to target `stakes` <!-- id: 1 -->
+    - [x] Inspect `src/vm.rs` logic
+    - [x] Modify `src/vm.rs` to deduct from `ConsensusState.stakes`
+    - [x] Update `tests/slashing_test.rs` to verify stake reduction
+- [x] Verify both slashing mechanisms with tests

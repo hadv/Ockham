@@ -95,33 +95,25 @@ impl Executor {
             let hash = crate::types::keccak256(pk_bytes);
             let address = Address::from_slice(&hash[12..]);
 
-            let mut slashed_amount = U256::from(1000u64); // Fixed Slash Amount
+            let slashed_amount = U256::from(1000u64); // Fixed Slash Amount
 
-            if let Some(mut info) = db.basic(address).unwrap() {
-                if info.balance < slashed_amount {
-                    slashed_amount = info.balance; // Burn all
-                }
-                info.balance -= slashed_amount;
+            if let Ok(Some(mut state)) = db.get_consensus_state() {
+                if let Some(stake) = state.stakes.get_mut(&address) {
+                    if *stake < slashed_amount {
+                        *stake = U256::ZERO;
+                    } else {
+                        *stake -= slashed_amount;
+                    }
 
-                // Commit Balance Update
-                let new_info = crate::storage::AccountInfo {
-                    nonce: info.nonce,
-                    balance: info.balance,
-                    code_hash: Hash(info.code_hash.0), // Revm to Internal Hash
-                    code: info.code.map(|c| c.original_bytes()),
-                };
-                db.commit_account(address, new_info).unwrap();
-                log::warn!(
-                    "Slashed Validator {:?} amount {:?}",
-                    address,
-                    slashed_amount
-                );
+                    log::warn!(
+                        "Slashed Validator {:?} amount {:?}",
+                        address,
+                        slashed_amount
+                    );
 
-                // 4. Remove from Committee if low balance (Force Remove)
-                let min_stake = U256::from(2000u64);
-                #[allow(clippy::collapsible_if)]
-                if info.balance < min_stake {
-                    if let Ok(Some(mut state)) = db.get_consensus_state() {
+                    // 4. Remove from Committee if low stake
+                    let min_stake = U256::from(2000u64);
+                    if *stake < min_stake {
                         // Check Pending
                         if let Some(pos) = state
                             .pending_validators
@@ -129,8 +121,6 @@ impl Executor {
                             .position(|(pk, _)| *pk == offender)
                         {
                             state.pending_validators.remove(pos);
-                            // Also refund stake if any?
-                            // Logic: validator must maintain min_stake to stay pending.
                             log::warn!(
                                 "Validator Removed from Pending (Low Stake): {:?}",
                                 offender
@@ -138,19 +128,20 @@ impl Executor {
                         }
                         // Check Active
                         if let Some(pos) = state.committee.iter().position(|x| *x == offender) {
-                            // Trigger Exit?
-                            // For simplicity, just remove from committee now?
-                            // Ideally should be "Exiting" state.
                             state.committee.remove(pos);
                             log::warn!(
                                 "Validator Removed from Committee (Low Stake): {:?}",
                                 offender
                             );
                         }
-                        // Check Exiting (Already leaving, but maybe accelerate?)
-                        // No need, just let them exit.
-                        db.save_consensus_state(&state).unwrap();
                     }
+                    db.save_consensus_state(&state).unwrap();
+                } else {
+                    log::warn!(
+                        "Validator {:?} has no stake entry found for address {:?}",
+                        offender,
+                        address
+                    );
                 }
             }
         }
@@ -207,7 +198,11 @@ impl Executor {
                             }
                             changed = true;
                         } else {
-                             log::warn!("Validator {:?} has no stake entry found for address {:?}", failed_leader, address);
+                            log::warn!(
+                                "Validator {:?} has no stake entry found for address {:?}",
+                                failed_leader,
+                                address
+                            );
                         }
 
                         // Threshold Check
