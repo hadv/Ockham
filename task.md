@@ -9,3 +9,4 @@
 - [x] Fix "no stake entry" warning in `test_failure.sh`
 - [x] Fix flaky `test_failure.sh` logging check
 - [x] Fix `try_propose` leader self-equivocation bug
+- [x] Exempt Timeout (`ZeroHash`) votes from Equivocation slashing

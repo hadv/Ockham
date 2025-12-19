@@ -505,6 +505,8 @@ impl SimplexState {
         // 0. Equivocation Check
         if let Some(existing_vote) = view_votes.get(&vote.author)
             && existing_vote.block_hash != vote.block_hash
+            && existing_vote.block_hash != Hash::default()
+            && vote.block_hash != Hash::default()
         {
             log::warn!(
                 "Equivocation Detected from {:?} in View {}",

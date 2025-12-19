@@ -11,7 +11,8 @@ We implemented a **Leader-Based Slashing** mechanism to punish validators who fa
    - **Score**: Incremented by 1.
    - **Slashing**: **10 units** are deducted from the validator's **Staking Balance** (`state.stakes`).
 3. **Equivocation Penalty (Double Vote)**:
-   - If a validator double votes, they are penalized.
+   - If a validator double votes (two different conflicting Block Hashes in the same View), they are penalized.
+   - **Note**: Voting for a Timeout (ZeroHash) *does not* count as equivocation, allowing validators to safely vote for a View Change even if they previously voted for a block proposal.
    - **Slashing**: **1000 units** are deducted from the validator's **Staking Balance**.
    - **Removal**: If remaining stake drops below **2000 units**, they are removed from the committee.
 4. **Reward (Successful Block)**:
