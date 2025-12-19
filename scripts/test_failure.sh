@@ -59,7 +59,7 @@ MAX_RETRIES=60
 SUCCESS=0
 
 for i in $(seq 1 $MAX_RETRIES); do
-    MAX_VIEW=$(grep -o "View Advanced to [0-9]*" node0.log | awk '{print $NF}' | sort -n | tail -1)
+    MAX_VIEW=$(grep -o "View Advanced to [0-9]*" node*.log | awk '{print $NF}' | sort -n | tail -1)
     if [ -z "$MAX_VIEW" ]; then MAX_VIEW=0; fi
     
     echo "Wait $i/$MAX_RETRIES... Current View: $MAX_VIEW"
