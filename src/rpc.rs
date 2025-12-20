@@ -4,8 +4,18 @@ use crate::tx_pool::TxPool;
 use crate::types::{Address, Block, Transaction, U256};
 use jsonrpsee::core::{RpcResult, async_trait};
 use jsonrpsee::proc_macros::rpc;
+use serde::Deserialize;
 use std::sync::Arc;
 
+#[derive(Deserialize)]
+pub struct CallRequest {
+    pub from: Option<Address>,
+    pub to: Option<Address>,
+    pub gas: Option<u64>,
+    pub gas_price: Option<U256>,
+    pub value: Option<U256>,
+    pub data: Option<crate::types::Bytes>,
+}
 #[rpc(server)]
 pub trait OckhamRpc {
     #[method(name = "get_block_by_hash")]
@@ -23,16 +33,32 @@ pub trait OckhamRpc {
     #[method(name = "get_balance")]
     fn get_balance(&self, address: Address) -> RpcResult<U256>;
 
+    #[method(name = "get_transaction_count")]
+    fn get_transaction_count(&self, address: Address) -> RpcResult<u64>;
+
     #[method(name = "chain_id")]
     fn chain_id(&self) -> RpcResult<u64>;
 
     #[method(name = "suggest_base_fee")]
     fn suggest_base_fee(&self) -> RpcResult<U256>;
+
+    #[method(name = "call")]
+    fn call(&self, request: CallRequest, _block: Option<String>) -> RpcResult<crate::types::Bytes>;
+
+    #[method(name = "estimate_gas")]
+    fn estimate_gas(&self, request: CallRequest, _block: Option<String>) -> RpcResult<u64>;
+
+    #[method(name = "get_code")]
+    fn get_code(&self, address: Address, _block: Option<String>) -> RpcResult<crate::types::Bytes>;
+
+    #[method(name = "get_block_by_number")]
+    fn get_block_by_number(&self, number: String) -> RpcResult<Option<Block>>;
 }
 
 pub struct OckhamRpcImpl {
     storage: Arc<dyn Storage>,
     tx_pool: Arc<TxPool>,
+    executor: crate::vm::Executor,
     block_gas_limit: u64,
     broadcast_sender: tokio::sync::mpsc::Sender<Transaction>,
 }
@@ -41,12 +67,14 @@ impl OckhamRpcImpl {
     pub fn new(
         storage: Arc<dyn Storage>,
         tx_pool: Arc<TxPool>,
+        executor: crate::vm::Executor,
         block_gas_limit: u64,
         broadcast_sender: tokio::sync::mpsc::Sender<Transaction>,
     ) -> Self {
         Self {
             storage,
             tx_pool,
+            executor,
             block_gas_limit,
             broadcast_sender,
         }
@@ -132,6 +160,18 @@ impl OckhamRpcServer for OckhamRpcImpl {
         Ok(account.map(|a| a.balance).unwrap_or_default())
     }
 
+    fn get_transaction_count(&self, address: Address) -> RpcResult<u64> {
+        let account = self.storage.get_account(&address).map_err(|e| {
+            jsonrpsee::types::ErrorObject::owned(
+                -32000,
+                format!("Storage error: {:?}", e),
+                None::<()>,
+            )
+        })?;
+
+        Ok(account.map(|a| a.nonce).unwrap_or_default())
+    }
+
     fn chain_id(&self) -> RpcResult<u64> {
         Ok(1337) // TODO: Config
     }
@@ -184,6 +224,104 @@ impl OckhamRpcServer for OckhamRpcImpl {
                 / U256::from(target_gas)
                 / U256::from(base_fee_max_change_denominator);
             Ok(parent_base_fee.saturating_sub(base_fee_decrease))
+        }
+    }
+
+    fn call(&self, request: CallRequest, _block: Option<String>) -> RpcResult<crate::types::Bytes> {
+        let caller = request.from.unwrap_or_default();
+        let value = request.value.unwrap_or_default();
+        let data = request.data.unwrap_or_default();
+        let gas = request.gas.unwrap_or(self.block_gas_limit);
+
+        let (_, output) = self
+            .executor
+            .execute_ephemeral(caller, request.to, value, data, gas, vec![])
+            .map_err(|e| {
+                jsonrpsee::types::ErrorObject::owned(
+                    -32000,
+                    format!("Execution Error: {:?}", e),
+                    None::<()>,
+                )
+            })?;
+
+        Ok(crate::types::Bytes::from(output))
+    }
+
+    fn estimate_gas(&self, request: CallRequest, _block: Option<String>) -> RpcResult<u64> {
+        let caller = request.from.unwrap_or_default();
+        let value = request.value.unwrap_or_default();
+        let data = request.data.unwrap_or_default();
+        let gas = request.gas.unwrap_or(self.block_gas_limit);
+
+        let (gas_used, _) = self
+            .executor
+            .execute_ephemeral(caller, request.to, value, data, gas, vec![])
+            .map_err(|e| {
+                jsonrpsee::types::ErrorObject::owned(
+                    -32000,
+                    format!("Execution Error: {:?}", e),
+                    None::<()>,
+                )
+            })?;
+
+        Ok(gas_used)
+    }
+
+    fn get_code(&self, address: Address, _block: Option<String>) -> RpcResult<crate::types::Bytes> {
+        let account = self.storage.get_account(&address).map_err(|e| {
+            jsonrpsee::types::ErrorObject::owned(
+                -32000,
+                format!("Storage Error: {:?}", e),
+                None::<()>,
+            )
+        })?;
+
+        if let Some(info) = account {
+            if let Some(code) = info.code {
+                Ok(code)
+            } else if info.code_hash != Hash::default() {
+                let code = self
+                    .storage
+                    .get_code(&info.code_hash)
+                    .map_err(|e| {
+                        jsonrpsee::types::ErrorObject::owned(
+                            -32000,
+                            format!("Storage Error: {:?}", e),
+                            None::<()>,
+                        )
+                    })?
+                    .unwrap_or_default();
+                Ok(code)
+            } else {
+                Ok(crate::types::Bytes::default())
+            }
+        } else {
+            Ok(crate::types::Bytes::default())
+        }
+    }
+
+    fn get_block_by_number(&self, number: String) -> RpcResult<Option<Block>> {
+        let view = if number == "latest" {
+            if let Some(state) = self.storage.get_consensus_state().unwrap_or(None) {
+                state.preferred_view
+            } else {
+                return Ok(None);
+            }
+        } else if let Some(stripped) = number.strip_prefix("0x") {
+            u64::from_str_radix(stripped, 16).unwrap_or(0)
+        } else {
+            number.parse::<u64>().unwrap_or(0)
+        };
+
+        if let Some(qc) = self.storage.get_qc(view).map_err(|e| {
+            jsonrpsee::types::ErrorObject::owned(-32000, format!("{:?}", e), None::<()>)
+        })? {
+            let block = self.storage.get_block(&qc.block_hash).map_err(|e| {
+                jsonrpsee::types::ErrorObject::owned(-32000, format!("{:?}", e), None::<()>)
+            })?;
+            Ok(block)
+        } else {
+            Ok(None)
         }
     }
 }

@@ -549,4 +549,67 @@ impl Executor {
 
         Ok(())
     }
+
+    /// Execute a transaction ephemerally (no commit, for RPC 'call' and 'estimate_gas')
+    pub fn execute_ephemeral(
+        &self,
+        caller: Address,
+        to: Option<Address>,
+        value: U256,
+        data: crate::types::Bytes,
+        gas_limit: u64,
+        _access_list: Vec<crate::types::AccessListItem>, // Future proofing
+    ) -> Result<(u64, Vec<u8>), ExecutionError> {
+        let mut db = self.state.lock().unwrap();
+
+        // Setup EVM
+        let mut evm = EVM::new();
+        evm.database(&mut *db);
+
+        // Env setup (similar to execute_block but for single tx)
+        // We might need 'block' info for env.block, use default or current pending?
+        // For accurate simulation, we should use the 'pending' block context or 'latest'.
+        //db.get_consensus_state() gives us head.
+        // For now, use defaults for BlockEnv.
+
+        let tx_env = &mut evm.env.tx;
+        tx_env.caller = caller;
+        tx_env.transact_to = if let Some(addr) = to {
+            TransactTo::Call(addr)
+        } else {
+            TransactTo::Create(CreateScheme::Create)
+        };
+        tx_env.data = data;
+        tx_env.value = value;
+        tx_env.gas_limit = gas_limit;
+        tx_env.gas_price = U256::ZERO; // Simulation usually 0 or free
+        tx_env.gas_priority_fee = None;
+        tx_env.nonce = None; // Ignore nonce for simulation
+
+        // Execute
+        let result_and_state = evm
+            .transact()
+            .map_err(|e| ExecutionError::Evm(format!("{:?}", e)))?;
+
+        let result = result_and_state.result;
+
+        match result {
+            ExecutionResult::Success {
+                gas_used, output, ..
+            } => {
+                let data = match output {
+                    revm::primitives::Output::Call(b) => b.to_vec(),
+                    revm::primitives::Output::Create(b, _) => b.to_vec(),
+                };
+                Ok((gas_used, data))
+            }
+            ExecutionResult::Revert { gas_used, output } => {
+                // For 'call', we often want the revert data too.
+                Ok((gas_used, output.to_vec()))
+            }
+            ExecutionResult::Halt { reason, .. } => {
+                Err(ExecutionError::Evm(format!("Halted: {:?}", reason)))
+            }
+        }
+    }
 }

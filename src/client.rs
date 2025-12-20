@@ -37,6 +37,15 @@ impl OckhamClient {
         Ok(balance)
     }
 
+    pub async fn get_transaction_count(
+        &self,
+        address: Address,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        let params = rpc_params![address];
+        let nonce: u64 = self.client.request("get_transaction_count", params).await?;
+        Ok(nonce)
+    }
+
     pub async fn send_transaction(
         &self,
         nonce: u64,

@@ -71,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         committee,
         storage.clone(),
         tx_pool.clone(),
-        executor,
+        executor.clone(),
         block_gas_limit,
     );
 
@@ -82,6 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rpc_impl = OckhamRpcImpl::new(
         storage.clone(),
         tx_pool.clone(),
+        executor.clone(),
         block_gas_limit,
         bg_tx_sender,
     );
