@@ -67,6 +67,11 @@ impl Executor {
         self.process_liveness_slashing(block, &mut db);
 
         for tx in &block.payload {
+            if tx.gas_limit > crate::types::MAX_TX_GAS_LIMIT {
+                return Err(ExecutionError::Transaction(
+                    "Tx exceeds fixed tx gas limit (Fusaka)".into(),
+                ));
+            }
             if tx.gas_limit > self.block_gas_limit {
                 return Err(ExecutionError::Transaction(
                     "Tx exceeds block gas limit".into(),

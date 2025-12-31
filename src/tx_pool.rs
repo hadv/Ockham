@@ -15,6 +15,8 @@ pub enum PoolError {
     InvalidNonce(u64, u64),
     #[error("Storage Error: {0}")]
     StorageError(String),
+    #[error("Gas Limit Exceeded: max {0}, got {1}")]
+    GasLimitExceeded(u64, u64),
 }
 
 /// A simple Transaction Pool (Mempool).
@@ -41,6 +43,14 @@ impl TxPool {
 
     /// Add a transaction to the pool.
     pub fn add_transaction(&self, tx: Transaction) -> Result<(), PoolError> {
+        // 0. Check Gas Limit (Fusaka)
+        if tx.gas_limit > crate::types::MAX_TX_GAS_LIMIT {
+            return Err(PoolError::GasLimitExceeded(
+                crate::types::MAX_TX_GAS_LIMIT,
+                tx.gas_limit,
+            ));
+        }
+
         // 1. Validate Signature
         let sighash = tx.sighash();
         if !verify(&tx.public_key, &sighash.0, &tx.signature) {
