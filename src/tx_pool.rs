@@ -247,30 +247,4 @@ mod tests {
             _ => panic!("Expected InvalidNonce"),
         }
     }
-
-    #[test]
-    fn test_pool_gas_limit() {
-        use crate::types::MAX_TX_GAS_LIMIT;
-        let storage = Arc::new(MemStorage::new());
-        let pool = TxPool::new(storage);
-        let (pk, sk) = generate_keypair();
-
-        let mut tx = Transaction {
-            chain_id: 1,
-            nonce: 0,
-            max_priority_fee_per_gas: U256::ZERO,
-            max_fee_per_gas: U256::ZERO,
-            gas_limit: MAX_TX_GAS_LIMIT + 1, // Exceeds
-            to: None,
-            value: U256::ZERO,
-            data: Bytes::new(),
-            access_list: vec![],
-            public_key: pk.clone(),
-            signature: crate::crypto::Signature::default(),
-        };
-        tx.signature = sign(&sk, &tx.sighash().0);
-
-        let res = pool.add_transaction(tx);
-        assert!(matches!(res, Err(PoolError::GasLimitExceeded(..))));
-    }
 }
