@@ -2,7 +2,6 @@ use ockham::consensus::{ConsensusAction, SimplexState};
 use ockham::crypto::{Hash, PrivateKey, PublicKey};
 use ockham::storage::Storage;
 use ockham::types::{Block, QuorumCertificate, U256, Vote, VoteType};
-use revm::Database;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -60,7 +59,7 @@ fn test_slashing_flow() {
 
     // Initialize Stakes for Offender
     {
-        let mut db = state_manager.lock().unwrap();
+        let db = state_manager.lock().unwrap();
         let mut state = db.get_consensus_state().unwrap().unwrap();
         state.stakes.insert(offender_addr, U256::from(5000u64));
         db.save_consensus_state(&state).unwrap();
@@ -177,7 +176,7 @@ fn test_slashing_flow() {
     executor.execute_block(&mut block_to_exec).unwrap();
 
     // Check Stake
-    let mut db = validator.executor.state.lock().unwrap();
+    let db = validator.executor.state.lock().unwrap();
     let state = db.get_consensus_state().unwrap().unwrap();
     let stake = state.stakes.get(&offender_addr).unwrap();
 
