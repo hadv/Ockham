@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub type View = u64;
 
 pub const DEFAULT_BLOCK_GAS_LIMIT: u64 = 30_000_000;
+pub const MAX_TX_GAS_LIMIT: u64 = 16_777_216; // 2^24 (Fusaka EIP-7825)
 pub const INITIAL_BASE_FEE: u64 = 10_000_000; // 0.01 Gwei
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

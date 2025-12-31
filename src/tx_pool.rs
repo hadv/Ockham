@@ -15,6 +15,8 @@ pub enum PoolError {
     InvalidNonce(u64, u64),
     #[error("Storage Error: {0}")]
     StorageError(String),
+    #[error("Gas Limit Exceeded: max {0}, got {1}")]
+    GasLimitExceeded(u64, u64),
 }
 
 /// A simple Transaction Pool (Mempool).
@@ -41,6 +43,14 @@ impl TxPool {
 
     /// Add a transaction to the pool.
     pub fn add_transaction(&self, tx: Transaction) -> Result<(), PoolError> {
+        // 0. Check Gas Limit (Fusaka)
+        if tx.gas_limit > crate::types::MAX_TX_GAS_LIMIT {
+            return Err(PoolError::GasLimitExceeded(
+                crate::types::MAX_TX_GAS_LIMIT,
+                tx.gas_limit,
+            ));
+        }
+
         // 1. Validate Signature
         let sighash = tx.sighash();
         if !verify(&tx.public_key, &sighash.0, &tx.signature) {
@@ -236,5 +246,31 @@ mod tests {
             }
             _ => panic!("Expected InvalidNonce"),
         }
+    }
+
+    #[test]
+    fn test_pool_gas_limit() {
+        use crate::types::MAX_TX_GAS_LIMIT;
+        let storage = Arc::new(MemStorage::new());
+        let pool = TxPool::new(storage);
+        let (pk, sk) = generate_keypair();
+
+        let mut tx = Transaction {
+            chain_id: 1,
+            nonce: 0,
+            max_priority_fee_per_gas: U256::ZERO,
+            max_fee_per_gas: U256::ZERO,
+            gas_limit: MAX_TX_GAS_LIMIT + 1, // Exceeds
+            to: None,
+            value: U256::ZERO,
+            data: Bytes::new(),
+            access_list: vec![],
+            public_key: pk.clone(),
+            signature: crate::crypto::Signature::default(),
+        };
+        tx.signature = sign(&sk, &tx.sighash().0);
+
+        let res = pool.add_transaction(tx);
+        assert!(matches!(res, Err(PoolError::GasLimitExceeded(..))));
     }
 }
