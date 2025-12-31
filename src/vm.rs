@@ -61,10 +61,10 @@ impl Executor {
         );
 
         // 0. Process Evidence (Slashing)
-        self.process_equivocation_slashing(block, &mut *db);
+        self.process_equivocation_slashing(block, &mut db);
 
         // 0.5 Process Liveness (Leader Slashing)
-        self.process_liveness_slashing(block, &mut *db);
+        self.process_liveness_slashing(block, &mut db);
 
         for tx in &block.payload {
             if tx.gas_limit > self.block_gas_limit {
@@ -90,7 +90,7 @@ impl Executor {
             if tx.to == Some(sys_contract) {
                 self.process_system_contract(
                     tx,
-                    &mut *db,
+                    &mut db,
                     &mut receipts,
                     cumulative_gas_used,
                     block.view,
