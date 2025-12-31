@@ -61,174 +61,10 @@ impl Executor {
         );
 
         // 0. Process Evidence (Slashing)
-        for evidence in &block.evidence {
-            let v1 = &evidence.vote_a;
-            let v2 = &evidence.vote_b;
-
-            // 1. Verify Structure
-            if v1.author != v2.author {
-                log::warn!("Evidence Invalid: Different Authors");
-                continue;
-            }
-            if v1.view != v2.view {
-                log::warn!("Evidence Invalid: Different Views");
-                continue;
-            }
-            if v1.block_hash == v2.block_hash {
-                log::warn!("Evidence Invalid: Same Block Hash (Not equivocation)");
-                continue;
-            }
-
-            // 2. Verify Signatures
-            let a_valid = crate::crypto::verify(&v1.author, &v1.block_hash.0, &v1.signature);
-            let b_valid = crate::crypto::verify(&v2.author, &v2.block_hash.0, &v2.signature);
-
-            if !a_valid || !b_valid {
-                log::warn!("Evidence Invalid: Bad Signatures");
-                continue;
-            }
-
-            // 3. Slash!
-            let offender = v1.author.clone();
-            // Need Address from PublicKey
-            let pk_bytes = offender.0.to_bytes();
-            let hash = crate::types::keccak256(pk_bytes);
-            let address = Address::from_slice(&hash[12..]);
-
-            let slashed_amount = U256::from(1000u64); // Fixed Slash Amount
-
-            if let Ok(Some(mut state)) = db.get_consensus_state() {
-                if let Some(stake) = state.stakes.get_mut(&address) {
-                    if *stake < slashed_amount {
-                        *stake = U256::ZERO;
-                    } else {
-                        *stake -= slashed_amount;
-                    }
-
-                    log::warn!(
-                        "Slashed Validator {:?} amount {:?}",
-                        address,
-                        slashed_amount
-                    );
-
-                    // 4. Remove from Committee if low stake
-                    let min_stake = U256::from(2000u64);
-                    if *stake < min_stake {
-                        // Check Pending
-                        if let Some(pos) = state
-                            .pending_validators
-                            .iter()
-                            .position(|(pk, _)| *pk == offender)
-                        {
-                            state.pending_validators.remove(pos);
-                            log::warn!(
-                                "Validator Removed from Pending (Low Stake): {:?}",
-                                offender
-                            );
-                        }
-                        // Check Active
-                        if let Some(pos) = state.committee.iter().position(|x| *x == offender) {
-                            state.committee.remove(pos);
-                            log::warn!(
-                                "Validator Removed from Committee (Low Stake): {:?}",
-                                offender
-                            );
-                        }
-                    }
-                    db.save_consensus_state(&state).unwrap();
-                } else {
-                    log::warn!(
-                        "Validator {:?} has no stake entry found for address {:?}",
-                        offender,
-                        address
-                    );
-                }
-            }
-        }
+        self.process_equivocation_slashing(block, &mut db);
 
         // 0.5 Process Liveness (Leader Slashing)
-        if let Ok(Some(mut state)) = db.get_consensus_state() {
-            let mut changed = false;
-
-            // 1. Reward Current Leader (Author)
-            if let Some(score) = state.inactivity_scores.get_mut(&block.author) {
-                if *score > 0 {
-                    *score -= 1;
-                    changed = true;
-                }
-            } else {
-                // Initialize if not present (optimization: only if we need to track?)
-            }
-
-            // 2. Penalize Failed Leader (if Timeout QC)
-            let qc = &block.justify;
-            if qc.block_hash == Hash::default() && qc.view > 0 {
-                // Timeout detected for qc.view
-                let committee_len = state.committee.len();
-                if committee_len > 0 {
-                    let failed_leader_idx = (qc.view as usize) % committee_len;
-                    // Safety check index
-                    if let Some(failed_leader) = state.committee.get(failed_leader_idx).cloned() {
-                        log::warn!(
-                            "Timeout QC for View {}. Penalizing Leader {:?}",
-                            qc.view,
-                            failed_leader
-                        );
-
-                        // Increment Score
-                        let score = state
-                            .inactivity_scores
-                            .entry(failed_leader.clone())
-                            .or_insert(0);
-                        *score += 1;
-                        let current_score = *score;
-                        changed = true;
-
-                        // Immediate Slash (Incremental)
-                        let penalty = U256::from(10u64);
-                        let pk_bytes = failed_leader.0.to_bytes();
-                        let hash = crate::types::keccak256(pk_bytes);
-                        let address = Address::from_slice(&hash[12..]);
-
-                        if let Some(stake) = state.stakes.get_mut(&address) {
-                            if *stake < penalty {
-                                *stake = U256::ZERO;
-                            } else {
-                                *stake -= penalty;
-                            }
-                            changed = true;
-                        } else {
-                            log::warn!(
-                                "Validator {:?} has no stake entry found for address {:?}",
-                                failed_leader,
-                                address
-                            );
-                        }
-
-                        // Threshold Check
-                        if current_score > 50 {
-                            log::warn!(
-                                "Validator {:?} exceeded inactivity threshold ({}). Removing from committee.",
-                                failed_leader,
-                                current_score
-                            );
-                            if let Some(pos) =
-                                state.committee.iter().position(|x| *x == failed_leader)
-                            {
-                                state.committee.remove(pos);
-                                // Reset score
-                                state.inactivity_scores.remove(&failed_leader);
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if changed {
-                db.save_consensus_state(&state).unwrap();
-            }
-        }
+        self.process_liveness_slashing(block, &mut db);
 
         for tx in &block.payload {
             if tx.gas_limit > self.block_gas_limit {
@@ -246,164 +82,25 @@ impl Executor {
                 return Err(ExecutionError::Transaction("Invalid sender".into()));
             }
 
-            // 2. Setup EVM
-            let mut evm = EVM::new();
-            evm.database(&mut *db);
-
             // SYSTEM CONTRACT INTERCEPTION (Address 0x1000)
             let sys_contract = Address::from_slice(
                 &hex::decode("0000000000000000000000000000000000001000").unwrap(),
             );
 
             if tx.to == Some(sys_contract) {
-                // System Contract Call
-                log::info!("System Contract Call detected from {:?}", tx.sender());
-
-                // Simple Gas/Nonce deduction (Simulated for MVP)
-                let sender_acc = db.basic(tx.sender()).unwrap().unwrap();
-                if sender_acc.balance < tx.value {
-                    // + fee in real impl
-                    return Err(ExecutionError::Transaction("Insufficient Balance".into()));
-                }
-
-                // Decode Selector
-                if tx.data.len() >= 4 {
-                    let selector = &tx.data[0..4];
-                    match selector {
-                        // stake() -> 0x3a4b66f1
-                        [0x3a, 0x4b, 0x66, 0xf1] => {
-                            let min_stake = U256::from(2000u64); // Threshold
-                            if tx.value < min_stake {
-                                log::error!("Stake too low: {:?}", tx.value);
-                            } else if let Ok(Some(mut state)) = db.get_consensus_state() {
-                                let sender_pk = tx.public_key.clone();
-
-                                // 1. Lock Funds
-                                let current_stake =
-                                    *state.stakes.get(&tx.sender()).unwrap_or(&U256::ZERO);
-                                state.stakes.insert(tx.sender(), current_stake + tx.value);
-
-                                // 2. Add to Pending (if not already active/pending)
-                                let is_active = state.committee.contains(&sender_pk);
-                                let is_pending = state
-                                    .pending_validators
-                                    .iter()
-                                    .any(|(pk, _)| *pk == sender_pk);
-
-                                if !is_active && !is_pending {
-                                    let activation_view = block.view + 10; // Delay 10
-                                    state
-                                        .pending_validators
-                                        .push((sender_pk.clone(), activation_view));
-                                    log::info!(
-                                        "Validator Pending: {:?} until view {}",
-                                        sender_pk,
-                                        activation_view
-                                    );
-                                }
-                                db.save_consensus_state(&state).unwrap();
-                            }
-                        }
-                        // unstake() -> 0x2e17de78
-                        [0x2e, 0x17, 0xde, 0x78] => {
-                            if let Ok(Some(mut state)) = db.get_consensus_state() {
-                                let sender_pk = tx.public_key.clone();
-
-                                // Must be Active to Unstake
-                                if state.committee.contains(&sender_pk) {
-                                    // Schedule Exit
-                                    let exit_view = block.view + 10; // Delay 10
-                                    state
-                                        .exiting_validators
-                                        .push((sender_pk.clone(), exit_view));
-                                    log::info!(
-                                        "Validator Exiting: {:?} at view {}",
-                                        sender_pk,
-                                        exit_view
-                                    );
-                                    db.save_consensus_state(&state).unwrap();
-                                }
-                            }
-                        }
-                        // withdraw() -> 0x3ccfd60b
-                        [0x3c, 0xcf, 0xd6, 0x0b] => {
-                            if let Ok(Some(mut state)) = db.get_consensus_state() {
-                                let sender_pk = tx.public_key.clone();
-                                let sender_addr = tx.sender();
-
-                                let is_active = state.committee.contains(&sender_pk);
-                                let is_pending = state
-                                    .pending_validators
-                                    .iter()
-                                    .any(|(pk, _)| *pk == sender_pk);
-                                let is_exiting = state
-                                    .exiting_validators
-                                    .iter()
-                                    .any(|(pk, _)| *pk == sender_pk);
-
-                                #[allow(clippy::collapsible_if)]
-                                if let Some(stake) = state.stakes.get(&sender_addr).cloned() {
-                                    if !is_active
-                                        && !is_pending
-                                        && !is_exiting
-                                        && stake > U256::ZERO
-                                    {
-                                        // Refund
-                                        state.stakes.insert(sender_addr, U256::ZERO);
-                                        db.save_consensus_state(&state).unwrap();
-
-                                        // Credit Balance
-                                        let mut acc =
-                                            db.basic(sender_addr).unwrap().unwrap_or_default();
-                                        acc.balance += stake;
-
-                                        let new_info = crate::storage::AccountInfo {
-                                            nonce: acc.nonce,
-                                            balance: acc.balance,
-                                            code_hash: Hash(acc.code_hash.0),
-                                            code: acc.code.map(|c| c.original_bytes()),
-                                        };
-                                        db.commit_account(sender_addr, new_info).unwrap();
-
-                                        log::info!(
-                                            "Withdrawn Stake: {:?} for {:?}",
-                                            stake,
-                                            sender_addr
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        _ => {
-                            log::warn!("Unknown System Contract Function");
-                        }
-                    }
-                }
-
-                // Skip EVM Execution for this Tx, but record receipt?
-                // Deduct Balance manually
-                // CRITICAL FIX: Reload account info because it might have been modified by the System Contract Logic (e.g. withdraw refund)
-                let updated_acc = db.basic(tx.sender()).unwrap().unwrap_or_default();
-
-                let new_info = crate::storage::AccountInfo {
-                    nonce: updated_acc.nonce + 1,
-                    balance: updated_acc.balance - tx.value,
-                    code_hash: Hash(updated_acc.code_hash.0),
-                    code: updated_acc.code.map(|c| c.original_bytes()),
-                };
-                db.commit_account(tx.sender(), new_info).unwrap();
-
-                // Credit 0x1000? (Optional, burn is fine for now or lock)
-
-                // Push Receipt
-                receipts.push(crate::types::Receipt {
-                    status: 1,
+                self.process_system_contract(
+                    tx,
+                    &mut db,
+                    &mut receipts,
                     cumulative_gas_used,
-                    logs: vec![],
-                });
-
-                continue; // Skip standard EVM
+                    block.view,
+                )?;
+                continue;
             }
+
+            // 2. Setup EVM
+            let mut evm = EVM::new();
+            evm.database(&mut *db);
 
             // Set Block Info
             evm.env.block.basefee = block.base_fee_per_gas;
@@ -611,5 +308,321 @@ impl Executor {
                 Err(ExecutionError::Evm(format!("Halted: {:?}", reason)))
             }
         }
+    }
+    fn process_equivocation_slashing(&self, block: &Block, db: &mut StateManager) {
+        for evidence in &block.evidence {
+            let v1 = &evidence.vote_a;
+            let v2 = &evidence.vote_b;
+
+            // 1. Verify Structure
+            if v1.author != v2.author {
+                log::warn!("Evidence Invalid: Different Authors");
+                continue;
+            }
+            if v1.view != v2.view {
+                log::warn!("Evidence Invalid: Different Views");
+                continue;
+            }
+            if v1.block_hash == v2.block_hash {
+                log::warn!("Evidence Invalid: Same Block Hash (Not equivocation)");
+                continue;
+            }
+
+            // 2. Verify Signatures
+            let a_valid = crate::crypto::verify(&v1.author, &v1.block_hash.0, &v1.signature);
+            let b_valid = crate::crypto::verify(&v2.author, &v2.block_hash.0, &v2.signature);
+
+            if !a_valid || !b_valid {
+                log::warn!("Evidence Invalid: Bad Signatures");
+                continue;
+            }
+
+            // 3. Slash!
+            let offender = v1.author.clone();
+            // Need Address from PublicKey
+            let pk_bytes = offender.0.to_bytes();
+            let hash = crate::types::keccak256(pk_bytes);
+            let address = Address::from_slice(&hash[12..]);
+
+            let slashed_amount = U256::from(1000u64); // Fixed Slash Amount
+
+            if let Ok(Some(mut state)) = db.get_consensus_state() {
+                if let Some(stake) = state.stakes.get_mut(&address) {
+                    if *stake < slashed_amount {
+                        *stake = U256::ZERO;
+                    } else {
+                        *stake -= slashed_amount;
+                    }
+
+                    log::warn!(
+                        "Slashed Validator {:?} amount {:?}",
+                        address,
+                        slashed_amount
+                    );
+
+                    // 4. Remove from Committee if low stake
+                    let min_stake = U256::from(2000u64);
+                    if *stake < min_stake {
+                        // Check Pending
+                        if let Some(pos) = state
+                            .pending_validators
+                            .iter()
+                            .position(|(pk, _)| *pk == offender)
+                        {
+                            state.pending_validators.remove(pos);
+                            log::warn!(
+                                "Validator Removed from Pending (Low Stake): {:?}",
+                                offender
+                            );
+                        }
+                        // Check Active
+                        if let Some(pos) = state.committee.iter().position(|x| *x == offender) {
+                            state.committee.remove(pos);
+                            log::warn!(
+                                "Validator Removed from Committee (Low Stake): {:?}",
+                                offender
+                            );
+                        }
+                    }
+                    db.save_consensus_state(&state).unwrap();
+                } else {
+                    log::warn!(
+                        "Validator {:?} has no stake entry found for address {:?}",
+                        offender,
+                        address
+                    );
+                }
+            }
+        }
+    }
+
+    fn process_liveness_slashing(&self, block: &Block, db: &mut StateManager) {
+        if let Ok(Some(mut state)) = db.get_consensus_state() {
+            let mut changed = false;
+
+            // 1. Reward Current Leader (Author)
+            if let Some(score) = state.inactivity_scores.get_mut(&block.author) {
+                if *score > 0 {
+                    *score -= 1;
+                    changed = true;
+                }
+            } else {
+                // Initialize if not present (optimization: only if we need to track?)
+            }
+
+            // 2. Penalize Failed Leader (if Timeout QC)
+            let qc = &block.justify;
+            if qc.block_hash == Hash::default() && qc.view > 0 {
+                // Timeout detected for qc.view
+                let committee_len = state.committee.len();
+                if committee_len > 0 {
+                    let failed_leader_idx = (qc.view as usize) % committee_len;
+                    // Safety check index
+                    if let Some(failed_leader) = state.committee.get(failed_leader_idx).cloned() {
+                        log::warn!(
+                            "Timeout QC for View {}. Penalizing Leader {:?}",
+                            qc.view,
+                            failed_leader
+                        );
+
+                        // Increment Score
+                        let score = state
+                            .inactivity_scores
+                            .entry(failed_leader.clone())
+                            .or_insert(0);
+                        *score += 1;
+                        let current_score = *score;
+                        changed = true;
+
+                        // Immediate Slash (Incremental)
+                        let penalty = U256::from(10u64);
+                        let pk_bytes = failed_leader.0.to_bytes();
+                        let hash = crate::types::keccak256(pk_bytes);
+                        let address = Address::from_slice(&hash[12..]);
+
+                        if let Some(stake) = state.stakes.get_mut(&address) {
+                            if *stake < penalty {
+                                *stake = U256::ZERO;
+                            } else {
+                                *stake -= penalty;
+                            }
+                            changed = true;
+                        } else {
+                            log::warn!(
+                                "Validator {:?} has no stake entry found for address {:?}",
+                                failed_leader,
+                                address
+                            );
+                        }
+
+                        // Threshold Check
+                        if current_score > 50 {
+                            log::warn!(
+                                "Validator {:?} exceeded inactivity threshold ({}). Removing from committee.",
+                                failed_leader,
+                                current_score
+                            );
+                            if let Some(pos) =
+                                state.committee.iter().position(|x| *x == failed_leader)
+                            {
+                                state.committee.remove(pos);
+                                // Reset score
+                                state.inactivity_scores.remove(&failed_leader);
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if changed {
+                db.save_consensus_state(&state).unwrap();
+            }
+        }
+    }
+
+    fn process_system_contract(
+        &self,
+        tx: &crate::types::Transaction,
+        db: &mut StateManager,
+        receipts: &mut Vec<crate::types::Receipt>,
+        cumulative_gas_used: u64,
+        view: u64,
+    ) -> Result<(), ExecutionError> {
+        // System Contract Call
+        log::info!("System Contract Call detected from {:?}", tx.sender());
+
+        // Simple Gas/Nonce deduction (Simulated for MVP)
+        let sender_acc = db.basic(tx.sender()).unwrap().unwrap();
+        if sender_acc.balance < tx.value {
+            // + fee in real impl
+            return Err(ExecutionError::Transaction("Insufficient Balance".into()));
+        }
+
+        // Decode Selector
+        if tx.data.len() >= 4 {
+            let selector = &tx.data[0..4];
+            match selector {
+                // stake() -> 0x3a4b66f1
+                [0x3a, 0x4b, 0x66, 0xf1] => {
+                    let min_stake = U256::from(2000u64); // Threshold
+                    if tx.value < min_stake {
+                        log::error!("Stake too low: {:?}", tx.value);
+                    } else if let Ok(Some(mut state)) = db.get_consensus_state() {
+                        let sender_pk = tx.public_key.clone();
+
+                        // 1. Lock Funds
+                        let current_stake = *state.stakes.get(&tx.sender()).unwrap_or(&U256::ZERO);
+                        state.stakes.insert(tx.sender(), current_stake + tx.value);
+
+                        // 2. Add to Pending (if not already active/pending)
+                        let is_active = state.committee.contains(&sender_pk);
+                        let is_pending = state
+                            .pending_validators
+                            .iter()
+                            .any(|(pk, _)| *pk == sender_pk);
+
+                        if !is_active && !is_pending {
+                            let activation_view = view + 10; // Delay 10
+                            state
+                                .pending_validators
+                                .push((sender_pk.clone(), activation_view));
+                            log::info!(
+                                "Validator Pending: {:?} until view {}",
+                                sender_pk,
+                                activation_view
+                            );
+                        }
+                        db.save_consensus_state(&state).unwrap();
+                    }
+                }
+                // unstake() -> 0x2e17de78
+                [0x2e, 0x17, 0xde, 0x78] => {
+                    if let Ok(Some(mut state)) = db.get_consensus_state() {
+                        let sender_pk = tx.public_key.clone();
+
+                        // Must be Active to Unstake
+                        if state.committee.contains(&sender_pk) {
+                            // Schedule Exit
+                            let exit_view = view + 10; // Delay 10
+                            state
+                                .exiting_validators
+                                .push((sender_pk.clone(), exit_view));
+                            log::info!("Validator Exiting: {:?} at view {}", sender_pk, exit_view);
+                            db.save_consensus_state(&state).unwrap();
+                        }
+                    }
+                }
+                // withdraw() -> 0x3ccfd60b
+                [0x3c, 0xcf, 0xd6, 0x0b] => {
+                    if let Ok(Some(mut state)) = db.get_consensus_state() {
+                        let sender_pk = tx.public_key.clone();
+                        let sender_addr = tx.sender();
+
+                        let is_active = state.committee.contains(&sender_pk);
+                        let is_pending = state
+                            .pending_validators
+                            .iter()
+                            .any(|(pk, _)| *pk == sender_pk);
+                        let is_exiting = state
+                            .exiting_validators
+                            .iter()
+                            .any(|(pk, _)| *pk == sender_pk);
+
+                        #[allow(clippy::collapsible_if)]
+                        if let Some(stake) = state.stakes.get(&sender_addr).cloned() {
+                            if !is_active && !is_pending && !is_exiting && stake > U256::ZERO {
+                                // Refund
+                                state.stakes.insert(sender_addr, U256::ZERO);
+                                db.save_consensus_state(&state).unwrap();
+
+                                // Credit Balance
+                                let mut acc = db.basic(sender_addr).unwrap().unwrap_or_default();
+                                acc.balance += stake;
+
+                                let new_info = crate::storage::AccountInfo {
+                                    nonce: acc.nonce,
+                                    balance: acc.balance,
+                                    code_hash: Hash(acc.code_hash.0),
+                                    code: acc.code.map(|c| c.original_bytes()),
+                                };
+                                db.commit_account(sender_addr, new_info).unwrap();
+
+                                log::info!("Withdrawn Stake: {:?} for {:?}", stake, sender_addr);
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    log::warn!("Unknown System Contract Function");
+                }
+            }
+        }
+
+        // Skip EVM Execution for this Tx, but record receipt?
+        // Deduct Balance manually
+        // Reload account info to get the latest balance.
+        // The system contract (e.g., withdraw) might have modified the balance in the DB directly.
+        // We need the fresh balance to correctly deduct the transaction value and increment nonce.
+        let updated_acc = db.basic(tx.sender()).unwrap().unwrap_or_default();
+
+        let new_info = crate::storage::AccountInfo {
+            nonce: updated_acc.nonce + 1,
+            balance: updated_acc.balance - tx.value,
+            code_hash: Hash(updated_acc.code_hash.0),
+            code: updated_acc.code.map(|c| c.original_bytes()),
+        };
+        db.commit_account(tx.sender(), new_info).unwrap();
+
+        // Credit 0x1000? (Optional, burn is fine for now or lock)
+
+        // Push Receipt
+        receipts.push(crate::types::Receipt {
+            status: 1,
+            cumulative_gas_used,
+            logs: vec![],
+        });
+
+        Ok(())
     }
 }
