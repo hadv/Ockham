@@ -116,7 +116,7 @@ impl Transaction {
 
     // Helper for direct access to check if it is contract creation
     pub fn is_create(&self) -> bool {
-         match self {
+        match self {
             Transaction::Legacy(tx) => tx.to.is_none(),
             Transaction::AA(_) => false, // AA cannot directly deploy via "to=null" (usually via factory)
         }
@@ -126,11 +126,11 @@ impl Transaction {
     pub fn target(&self) -> Option<Address> {
         self.to()
     }
-    
+
     pub fn sighash(&self) -> Hash {
         match self {
             Transaction::Legacy(tx) => {
-                 let data = (
+                let data = (
                     tx.chain_id,
                     tx.nonce,
                     &tx.max_priority_fee_per_gas,
@@ -144,8 +144,8 @@ impl Transaction {
                 crate::crypto::hash_data(&data)
             }
             Transaction::AA(tx) => {
-                 // AA SigHash excludes signature
-                 let data = (
+                // AA SigHash excludes signature
+                let data = (
                     tx.chain_id,
                     tx.nonce,
                     &tx.max_priority_fee_per_gas,

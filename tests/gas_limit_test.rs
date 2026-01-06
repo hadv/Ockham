@@ -3,7 +3,8 @@ use ockham::state::StateManager;
 use ockham::storage::{AccountInfo, MemStorage, Storage};
 use ockham::tx_pool::{PoolError, TxPool};
 use ockham::types::{
-    Address, Block, Bytes, MAX_TX_GAS_LIMIT, QuorumCertificate, Transaction, LegacyTransaction, U256,
+    Address, Block, Bytes, LegacyTransaction, MAX_TX_GAS_LIMIT, QuorumCertificate, Transaction,
+    U256,
 };
 use ockham::vm::{ExecutionError, Executor};
 use std::sync::{Arc, Mutex};

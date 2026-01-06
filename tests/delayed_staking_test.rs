@@ -1,7 +1,7 @@
 use ockham::consensus::SimplexState;
 use ockham::crypto::{Hash, generate_keypair_from_id, hash_data, sign};
 use ockham::storage::{MemStorage, Storage};
-use ockham::types::{Address, Block, QuorumCertificate, Transaction, LegacyTransaction, U256};
+use ockham::types::{Address, Block, LegacyTransaction, QuorumCertificate, Transaction, U256};
 use revm::Database;
 use std::sync::Arc;
 

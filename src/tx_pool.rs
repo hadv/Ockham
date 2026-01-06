@@ -1,11 +1,11 @@
 use crate::crypto::{Hash, verify};
 use crate::storage::Storage;
-use crate::types::{Transaction, Address};
+use crate::types::{Address, Transaction};
+use revm::EVM; // Need EVM for AA validation
+use revm::primitives::TransactTo;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use thiserror::Error;
-use revm::EVM; // Need EVM for AA validation
-use revm::primitives::TransactTo; // U256 removed
+use thiserror::Error; // U256 removed
 
 #[derive(Debug, Error)]
 pub enum PoolError {
@@ -67,13 +67,13 @@ impl TxPool {
                 // Run EVM validation
                 // We need a temporary state manager
                 let state_manager = crate::state::StateManager::new(self.storage.clone(), None);
-                // Note: This is an expensive operation for add_transaction. 
+                // Note: This is an expensive operation for add_transaction.
                 // In production, this should be async or limited.
-                
+
                 let mut db = state_manager;
                 let mut evm = EVM::new();
                 evm.database(&mut db);
-                
+
                 // Minimal Env
                 let tx_env = &mut evm.env.tx;
                 tx_env.caller = Address::ZERO;
@@ -83,12 +83,14 @@ impl TxPool {
                 tx_env.data = crate::types::Bytes::from(selector);
                 tx_env.gas_limit = 200_000;
                 tx_env.nonce = Some(aa_tx.nonce);
-                
+
                 // Execute
-                let result = evm.transact().map_err(|e| PoolError::InvalidAA(format!("EVM Error: {:?}", e)))?;
-                
+                let result = evm
+                    .transact()
+                    .map_err(|e| PoolError::InvalidAA(format!("EVM Error: {:?}", e)))?;
+
                 match result.result {
-                    revm::primitives::ExecutionResult::Success { .. } => {},
+                    revm::primitives::ExecutionResult::Success { .. } => {}
                     _ => return Err(PoolError::InvalidAA("Validation Reverted or Failed".into())),
                 }
             }
@@ -115,9 +117,9 @@ impl TxPool {
         // For MVP we just check against state.
 
         let hash = crate::crypto::hash_data(&tx); // Transaction enum implements Hash via Serialize? No, we used hash_data(&tx) which uses bincode. 
-        // Wait, types.rs Transaction has sighash(). hash_data(&tx) hashes the whole enum. 
+        // Wait, types.rs Transaction has sighash(). hash_data(&tx) hashes the whole enum.
         // Hash collision between identical txs is what we want to detect.
-        // However, LegacyTransaction sighash() excludes signature. 
+        // However, LegacyTransaction sighash() excludes signature.
         // TxPool usually uses the full hash (including sig).
         // Let's assume `crate::crypto::hash_data(&tx)` does full serialization hash.
 
@@ -216,7 +218,7 @@ mod tests {
     use super::*;
     use crate::crypto::{generate_keypair, sign};
     use crate::storage::MemStorage;
-    use crate::types::{Address, Bytes, U256, LegacyTransaction}; // AccessListItem not used in test but needed if we construct
+    use crate::types::{Address, Bytes, LegacyTransaction, U256}; // AccessListItem not used in test but needed if we construct
 
     #[test]
     fn test_add_transaction_validation() {
@@ -274,7 +276,7 @@ mod tests {
         bad_tx.nonce = 1; // Change body => sighash changes
         // Signature remains for nonce 0 => Invalid
         let bad_tx_enum = Transaction::Legacy(bad_tx);
-        
+
         assert!(matches!(
             pool.add_transaction(bad_tx_enum).unwrap_err(),
             PoolError::InvalidSignature
@@ -296,7 +298,7 @@ mod tests {
         let mut low_nonce_tx = tx.clone();
         low_nonce_tx.nonce = 4;
         // Resign
-         let data = (
+        let data = (
             low_nonce_tx.chain_id,
             low_nonce_tx.nonce,
             &low_nonce_tx.max_priority_fee_per_gas,

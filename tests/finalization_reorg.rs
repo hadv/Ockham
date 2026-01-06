@@ -1,6 +1,6 @@
 use ockham::consensus::{ConsensusAction, SimplexState};
 use ockham::crypto::{PrivateKey, PublicKey, hash_data};
-use ockham::types::{Address, Bytes, Transaction, LegacyTransaction, U256};
+use ockham::types::{Address, Bytes, LegacyTransaction, Transaction, U256};
 
 #[test]
 fn test_state_ommitment_on_finalization() {

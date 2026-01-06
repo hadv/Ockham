@@ -106,7 +106,7 @@ impl Executor {
                 // Only Legacy Transactions can interact with System Contract for Staking
                 // because they have the PublicKey needed for consensus.
                 if let Transaction::Legacy(legacy_tx) = tx {
-                     self.process_system_contract(
+                    self.process_system_contract(
                         legacy_tx,
                         &mut db,
                         &mut receipts,
@@ -114,10 +114,12 @@ impl Executor {
                         block.view,
                     )?;
                 } else {
-                    log::warn!("AA Transaction attempted to call System Contract (Staking). Ignored.");
+                    log::warn!(
+                        "AA Transaction attempted to call System Contract (Staking). Ignored."
+                    );
                     // We consume nonce? Yes to prevent replay loop.
                     // Charge base gas? Yes.
-                     // Basic fee deduction
+                    // Basic fee deduction
                     let sender_acc = db.basic(tx.sender()).unwrap().unwrap_or_default();
                     let cost = tx.gas_limit() as u128 * tx.max_fee_per_gas().to::<u128>(); // Simplified
                     // ... Just skip for now or treat as failed tx.
@@ -292,18 +294,18 @@ impl Executor {
 
         let tx_env = &mut evm.env.tx;
         tx_env.caller = Address::ZERO; // EntryPoint-like caller or generic?
-                                      // EIP-7702/RIP-7560: Caller is the Protocol (0x0 or special address)
-                                      // calling validateTransaction on 'sender'
+        // EIP-7702/RIP-7560: Caller is the Protocol (0x0 or special address)
+        // calling validateTransaction on 'sender'
         tx_env.transact_to = TransactTo::Call(tx.sender);
-        
-        // Function Selector: validateTransaction(bytes32,bytes32,bytes) 
+
+        // Function Selector: validateTransaction(bytes32,bytes32,bytes)
         // We need to define the signature. For MVP let's assume `validateTransaction(address,uint256,bytes)`
-        // or just pass the raw data? 
+        // or just pass the raw data?
         // RIP-7560: `validateTransaction(bytes32 txHash, bytes signature)` (Simplified)
         let selector = hex::decode("9a22d64f").unwrap(); // Example selector
         // TODO: Construct proper calldata with args
-        tx_env.data = crate::types::Bytes::from(selector); 
-        
+        tx_env.data = crate::types::Bytes::from(selector);
+
         tx_env.value = U256::ZERO;
         tx_env.gas_limit = 200_000; // Validation limit
         tx_env.gas_price = tx.max_fee_per_gas;
@@ -316,12 +318,14 @@ impl Executor {
 
         match result_and_state.result {
             ExecutionResult::Success { .. } => Ok(()),
-            ExecutionResult::Revert { output, .. } => {
-                 Err(ExecutionError::Transaction(format!("AA Validation Reverted: {:?}", output)))
-            }
-            ExecutionResult::Halt { reason, .. } => {
-                Err(ExecutionError::Transaction(format!("AA Validation Halted: {:?}", reason)))
-            }
+            ExecutionResult::Revert { output, .. } => Err(ExecutionError::Transaction(format!(
+                "AA Validation Reverted: {:?}",
+                output
+            ))),
+            ExecutionResult::Halt { reason, .. } => Err(ExecutionError::Transaction(format!(
+                "AA Validation Halted: {:?}",
+                reason
+            ))),
         }
     }
 
@@ -563,7 +567,10 @@ impl Executor {
         view: u64,
     ) -> Result<(), ExecutionError> {
         // System Contract Call
-        log::info!("System Contract Call detected from {:?}", crate::types::Transaction::Legacy(tx.clone()).sender());
+        log::info!(
+            "System Contract Call detected from {:?}",
+            crate::types::Transaction::Legacy(tx.clone()).sender()
+        );
 
         // Simple Gas/Nonce deduction (Simulated for MVP)
         let _sender_acc = db.basic(tx.sender()).unwrap().unwrap();
@@ -587,8 +594,14 @@ impl Executor {
                         let sender_pk = tx.public_key.clone();
 
                         // 1. Lock Funds
-                        let current_stake = *state.stakes.get(&crate::types::Transaction::Legacy(tx.clone()).sender()).unwrap_or(&U256::ZERO);
-                        state.stakes.insert(crate::types::Transaction::Legacy(tx.clone()).sender(), current_stake + tx.value);
+                        let current_stake = *state
+                            .stakes
+                            .get(&crate::types::Transaction::Legacy(tx.clone()).sender())
+                            .unwrap_or(&U256::ZERO);
+                        state.stakes.insert(
+                            crate::types::Transaction::Legacy(tx.clone()).sender(),
+                            current_stake + tx.value,
+                        );
 
                         // 2. Add to Pending (if not already active/pending)
                         let is_active = state.committee.contains(&sender_pk);
@@ -676,7 +689,10 @@ impl Executor {
 
         // Skip EVM Execution for this Tx, but record receipt?
         // Deduct Balance manually
-        let updated_acc = db.basic(crate::types::Transaction::Legacy(tx.clone()).sender()).unwrap().unwrap_or_default();
+        let updated_acc = db
+            .basic(crate::types::Transaction::Legacy(tx.clone()).sender())
+            .unwrap()
+            .unwrap_or_default();
 
         let new_info = crate::storage::AccountInfo {
             nonce: updated_acc.nonce + 1,
@@ -684,7 +700,11 @@ impl Executor {
             code_hash: Hash(updated_acc.code_hash.0),
             code: updated_acc.code.map(|c| c.original_bytes()),
         };
-        db.commit_account(crate::types::Transaction::Legacy(tx.clone()).sender(), new_info).unwrap();
+        db.commit_account(
+            crate::types::Transaction::Legacy(tx.clone()).sender(),
+            new_info,
+        )
+        .unwrap();
 
         // Push Receipt
         receipts.push(crate::types::Receipt {
@@ -695,5 +715,4 @@ impl Executor {
 
         Ok(())
     }
-
 }
