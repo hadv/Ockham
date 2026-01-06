@@ -55,9 +55,9 @@ fn test_delayed_staking_lifecycle() {
     };
     let mut tx_fund_signed = tx_fund.clone();
     // Wrap to get sighash
-    let hash = Transaction::Legacy(tx_fund.clone()).sighash();
+    let hash = Transaction::Legacy(Box::new(tx_fund.clone())).sighash();
     tx_fund_signed.signature = sign(&alice_sk, &hash.0);
-    let tx_fund_enum = Transaction::Legacy(tx_fund_signed);
+    let tx_fund_enum = Transaction::Legacy(Box::new(tx_fund_signed));
 
     // Helper to calculate roots
     let prepare_block = |blk: &mut Block, store: Arc<MemStorage>| {
@@ -129,9 +129,9 @@ fn test_delayed_staking_lifecycle() {
         signature: ockham::crypto::Signature::default(),
     };
     let mut tx_stake_signed = tx_stake.clone();
-    let hash_stake = Transaction::Legacy(tx_stake.clone()).sighash();
+    let hash_stake = Transaction::Legacy(Box::new(tx_stake.clone())).sighash();
     tx_stake_signed.signature = sign(&bob_sk, &hash_stake.0);
-    let tx_stake_enum = Transaction::Legacy(tx_stake_signed);
+    let tx_stake_enum = Transaction::Legacy(Box::new(tx_stake_signed));
 
     let sig1 = sign(&alice_sk, &b1_hash.0);
     let qc1 = QuorumCertificate {
@@ -256,9 +256,9 @@ fn test_delayed_staking_lifecycle() {
         public_key: bob_pk.clone(),
         signature: ockham::crypto::Signature::default(),
     };
-    let hash_unstake = Transaction::Legacy(tx_unstake.clone()).sighash();
+    let hash_unstake = Transaction::Legacy(Box::new(tx_unstake.clone())).sighash();
     tx_unstake.signature = sign(&bob_sk, &hash_unstake.0);
-    let tx_unstake_enum = Transaction::Legacy(tx_unstake);
+    let tx_unstake_enum = Transaction::Legacy(Box::new(tx_unstake));
 
     // New committee for validation?
     // Wait, B13 must be signed by committee. Committee is now [Alice, Bob].
@@ -433,9 +433,9 @@ fn test_delayed_staking_lifecycle() {
         public_key: bob_pk.clone(),
         signature: ockham::crypto::Signature::default(),
     };
-    let hash_withdraw = Transaction::Legacy(tx_withdraw.clone()).sighash();
+    let hash_withdraw = Transaction::Legacy(Box::new(tx_withdraw.clone())).sighash();
     tx_withdraw.signature = sign(&bob_sk, &hash_withdraw.0);
-    let tx_withdraw_enum = Transaction::Legacy(tx_withdraw);
+    let tx_withdraw_enum = Transaction::Legacy(Box::new(tx_withdraw));
 
     // B24. Committee is just Alice again.
     // QC for B23 (Alice+Bob).

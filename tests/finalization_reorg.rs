@@ -51,9 +51,9 @@ fn test_state_ommitment_on_finalization() {
         signature: dummy_sig,
     };
 
-    let sighash = Transaction::Legacy(tx.clone()).sighash();
+    let sighash = Transaction::Legacy(Box::new(tx.clone())).sighash();
     tx.signature = ockham::crypto::sign(&keys[0].1, &sighash.0);
-    let tx_enum = Transaction::Legacy(tx);
+    let tx_enum = Transaction::Legacy(Box::new(tx));
 
     node1.tx_pool.add_transaction(tx_enum.clone()).unwrap();
 

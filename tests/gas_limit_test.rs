@@ -46,9 +46,9 @@ fn test_transaction_gas_limit() {
         public_key: pk.clone(),
         signature: ockham::crypto::Signature::default(),
     };
-    let hash_ok = Transaction::Legacy(tx_ok.clone()).sighash();
+    let hash_ok = Transaction::Legacy(Box::new(tx_ok.clone())).sighash();
     tx_ok.signature = sign(&sk, &hash_ok.0);
-    let tx_ok_enum = Transaction::Legacy(tx_ok);
+    let tx_ok_enum = Transaction::Legacy(Box::new(tx_ok));
 
     let mut block = Block::new_dummy(pk.clone(), 1, Hash::default(), QuorumCertificate::default());
     block.base_fee_per_gas = U256::from(10_000_000); // 0.01 Gwei
@@ -72,9 +72,9 @@ fn test_transaction_gas_limit() {
         public_key: pk.clone(),
         signature: ockham::crypto::Signature::default(),
     };
-    let hash_bad = Transaction::Legacy(tx_bad.clone()).sighash();
+    let hash_bad = Transaction::Legacy(Box::new(tx_bad.clone())).sighash();
     tx_bad.signature = sign(&sk, &hash_bad.0);
-    let tx_bad_enum = Transaction::Legacy(tx_bad);
+    let tx_bad_enum = Transaction::Legacy(Box::new(tx_bad));
 
     let mut block_bad =
         Block::new_dummy(pk.clone(), 2, Hash::default(), QuorumCertificate::default());
@@ -111,9 +111,9 @@ fn test_pool_gas_limit() {
         public_key: pk.clone(),
         signature: ockham::crypto::Signature::default(),
     };
-    let hash = Transaction::Legacy(tx.clone()).sighash();
+    let hash = Transaction::Legacy(Box::new(tx.clone())).sighash();
     tx.signature = sign(&sk, &hash.0);
-    let tx_enum = Transaction::Legacy(tx);
+    let tx_enum = Transaction::Legacy(Box::new(tx));
 
     let res = pool.add_transaction(tx_enum);
     assert!(matches!(res, Err(PoolError::GasLimitExceeded(..))));

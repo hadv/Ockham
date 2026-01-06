@@ -100,12 +100,12 @@ impl OckhamClient {
         };
 
         // 5. Sign
-        let tx_enum = crate::types::Transaction::Legacy(legacy_tx.clone());
+        let tx_enum = crate::types::Transaction::Legacy(Box::new(legacy_tx.clone()));
         let sighash = tx_enum.sighash();
         let signature = sign(key, &sighash.0);
         legacy_tx.signature = signature;
 
-        let tx_enum = crate::types::Transaction::Legacy(legacy_tx);
+        let tx_enum = crate::types::Transaction::Legacy(Box::new(legacy_tx));
 
         // 6. Send
         let hash: crate::crypto::Hash = self

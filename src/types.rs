@@ -49,8 +49,8 @@ pub struct AATransaction {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum Transaction {
-    Legacy(LegacyTransaction),
-    AA(AATransaction),
+    Legacy(Box<LegacyTransaction>),
+    AA(Box<AATransaction>),
 }
 
 impl Transaction {

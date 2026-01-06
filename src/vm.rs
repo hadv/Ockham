@@ -120,8 +120,8 @@ impl Executor {
                     // We consume nonce? Yes to prevent replay loop.
                     // Charge base gas? Yes.
                     // Basic fee deduction
-                    let sender_acc = db.basic(tx.sender()).unwrap().unwrap_or_default();
-                    let cost = tx.gas_limit() as u128 * tx.max_fee_per_gas().to::<u128>(); // Simplified
+                    let _sender_acc = db.basic(tx.sender()).unwrap().unwrap_or_default();
+                    let _cost = tx.gas_limit() as u128 * tx.max_fee_per_gas().to::<u128>(); // Simplified
                     // ... Just skip for now or treat as failed tx.
                     receipts.push(crate::types::Receipt {
                         status: 0,
@@ -569,11 +569,13 @@ impl Executor {
         // System Contract Call
         log::info!(
             "System Contract Call detected from {:?}",
-            crate::types::Transaction::Legacy(tx.clone()).sender()
+            crate::types::Transaction::Legacy(Box::new(tx.clone())).sender()
         );
 
         // Simple Gas/Nonce deduction (Simulated for MVP)
-        let _sender_acc = db.basic(tx.sender()).unwrap().unwrap();
+        // Wraps in Enum to use helper or compute manually.
+        let tx_enum = crate::types::Transaction::Legacy(Box::new(tx.clone()));
+        let _sender_acc = db.basic(tx_enum.sender()).unwrap().unwrap();
         // if sender_acc.balance < tx.value {
         //     // + fee in real impl
         //     return Err(ExecutionError::Transaction("Insufficient Balance".into()));
@@ -581,7 +583,7 @@ impl Executor {
 
         // Simulate cost deduction if needed, or remove.
         // For MVP we just log.
-        let _cost = tx.max_fee_per_gas();
+        let _cost = tx.max_fee_per_gas; // Field access for Legacy Tx struct
         if tx.data.len() >= 4 {
             let selector = &tx.data[0..4];
             match selector {
@@ -596,62 +598,51 @@ impl Executor {
                         // 1. Lock Funds
                         let current_stake = *state
                             .stakes
-                            .get(&crate::types::Transaction::Legacy(tx.clone()).sender())
+                            .get(&crate::types::Transaction::Legacy(Box::new(tx.clone())).sender())
                             .unwrap_or(&U256::ZERO);
                         state.stakes.insert(
-                            crate::types::Transaction::Legacy(tx.clone()).sender(),
+                            crate::types::Transaction::Legacy(Box::new(tx.clone())).sender(),
                             current_stake + tx.value,
                         );
+                        // 2. Add to Pending
+                        // Calculate activation view = current + 10 (epoch length)
+                        let activation_view = view + 10;
+                        state.pending_validators.push((sender_pk, activation_view));
 
-                        // 2. Add to Pending (if not already active/pending)
-                        let is_active = state.committee.contains(&sender_pk);
-                        let is_pending = state
-                            .pending_validators
-                            .iter()
-                            .any(|(pk, _)| *pk == sender_pk);
-
-                        if !is_active && !is_pending {
-                            let activation_view = view + 10; // Delay 10
-                            state
-                                .pending_validators
-                                .push((sender_pk.clone(), activation_view));
-                            log::info!(
-                                "Validator Pending: {:?} until view {}",
-                                sender_pk,
-                                activation_view
-                            );
-                        }
                         db.save_consensus_state(&state).unwrap();
+                        log::info!("Staked {:?} for validator", tx.value);
                     }
                 }
                 // unstake() -> 0x2e17de78
                 [0x2e, 0x17, 0xde, 0x78] => {
                     if let Ok(Some(mut state)) = db.get_consensus_state() {
-                        let sender_pk = tx.public_key.clone();
-
-                        // Must be Active to Unstake
-                        if state.committee.contains(&sender_pk) {
-                            // Schedule Exit
-                            let exit_view = view + 10; // Delay 10
-                            state
-                                .exiting_validators
-                                .push((sender_pk.clone(), exit_view));
-                            log::info!("Validator Exiting: {:?} at view {}", sender_pk, exit_view);
+                        let sender_addr = crate::types::Transaction::Legacy(Box::new(tx.clone())).sender();
+                        if let Some(pos) = state
+                            .committee
+                            .iter()
+                            .position(|pk| crate::types::keccak256(pk.0.to_bytes())[12..] == sender_addr.0)
+                        {
+                            let pk = state.committee[pos].clone();
+                            let exit_view = view + 10;
+                            state.exiting_validators.push((pk, exit_view));
                             db.save_consensus_state(&state).unwrap();
+                            log::info!("Validator Unstaked/Exiting: {:?}", sender_addr);
+                        } else {
+                             log::warn!("Unstake failed: Not in committee");
                         }
                     }
                 }
                 // withdraw() -> 0x3ccfd60b
                 [0x3c, 0xcf, 0xd6, 0x0b] => {
                     if let Ok(Some(mut state)) = db.get_consensus_state() {
-                        let sender_pk = tx.public_key.clone();
-                        let sender_addr = crate::types::Transaction::Legacy(tx.clone()).sender();
+                         let sender_pk = tx.public_key.clone();
+                         let sender_addr = crate::types::Transaction::Legacy(Box::new(tx.clone())).sender();
 
-                        let is_active = state.committee.contains(&sender_pk);
-                        let is_pending = state
-                            .pending_validators
-                            .iter()
-                            .any(|(pk, _)| *pk == sender_pk);
+                         let is_active = state.committee.contains(&sender_pk);
+                         let is_pending = state
+                             .pending_validators
+                             .iter()
+                             .any(|(pk, _)| *pk == sender_pk);
                         let is_exiting = state
                             .exiting_validators
                             .iter()
@@ -690,7 +681,7 @@ impl Executor {
         // Skip EVM Execution for this Tx, but record receipt?
         // Deduct Balance manually
         let updated_acc = db
-            .basic(crate::types::Transaction::Legacy(tx.clone()).sender())
+            .basic(crate::types::Transaction::Legacy(Box::new(tx.clone())).sender())
             .unwrap()
             .unwrap_or_default();
 
@@ -701,7 +692,7 @@ impl Executor {
             code: updated_acc.code.map(|c| c.original_bytes()),
         };
         db.commit_account(
-            crate::types::Transaction::Legacy(tx.clone()).sender(),
+            crate::types::Transaction::Legacy(Box::new(tx.clone())).sender(),
             new_info,
         )
         .unwrap();
