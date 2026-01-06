@@ -294,7 +294,7 @@ impl Executor {
 
         let tx_env = &mut evm.env.tx;
         tx_env.caller = Address::ZERO; // EntryPoint-like caller or generic?
-        // EIP-7702/RIP-7560: Caller is the Protocol (0x0 or special address)
+        // EIP-7701/RIP-7560: Caller is the Protocol (0x0 or special address)
         // calling validateTransaction on 'sender'
         tx_env.transact_to = TransactTo::Call(tx.sender);
 
