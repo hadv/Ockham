@@ -15,9 +15,9 @@ pub struct AccessListItem {
     pub storage_keys: Vec<U256>,
 }
 
-/// EIP-1559 style Transaction
+/// EIP-1559 style Legacy Transaction
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Transaction {
+pub struct LegacyTransaction {
     pub chain_id: u64,
     pub nonce: u64,
     pub max_priority_fee_per_gas: U256,
@@ -31,40 +31,134 @@ pub struct Transaction {
     pub signature: Signature,
 }
 
+/// Native Account Abstraction Transaction (EIP-7701 / RIP-7560)
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AATransaction {
+    pub chain_id: u64,
+    pub nonce: u64,
+    pub max_priority_fee_per_gas: U256,
+    pub max_fee_per_gas: U256,
+    pub gas_limit: u64,
+    pub sender: Address, // Smart Contract Account
+    pub data: Bytes,     // Execution calldata
+    pub paymaster: Option<Address>,
+    pub signature: Bytes, // Flexible auth data
+    pub builder_fee: U256,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type")]
+pub enum Transaction {
+    Legacy(LegacyTransaction),
+    AA(AATransaction),
+}
+
 impl Transaction {
-    /// Derive the sender address from the public key.
     pub fn sender(&self) -> Address {
-        let pk_bytes = self.public_key.0.to_bytes();
-        let hash = keccak256(pk_bytes);
-        Address::from_slice(&hash[12..])
+        match self {
+            Transaction::Legacy(tx) => {
+                let pk_bytes = tx.public_key.0.to_bytes();
+                let hash = keccak256(pk_bytes);
+                Address::from_slice(&hash[12..])
+            }
+            Transaction::AA(tx) => tx.sender,
+        }
     }
 
-    /// Check if this is a contract creation transaction.
+    pub fn nonce(&self) -> u64 {
+        match self {
+            Transaction::Legacy(tx) => tx.nonce,
+            Transaction::AA(tx) => tx.nonce,
+        }
+    }
+
+    pub fn gas_limit(&self) -> u64 {
+        match self {
+            Transaction::Legacy(tx) => tx.gas_limit,
+            Transaction::AA(tx) => tx.gas_limit,
+        }
+    }
+
+    pub fn max_fee_per_gas(&self) -> U256 {
+        match self {
+            Transaction::Legacy(tx) => tx.max_fee_per_gas,
+            Transaction::AA(tx) => tx.max_fee_per_gas,
+        }
+    }
+
+    pub fn max_priority_fee_per_gas(&self) -> U256 {
+        match self {
+            Transaction::Legacy(tx) => tx.max_priority_fee_per_gas,
+            Transaction::AA(tx) => tx.max_priority_fee_per_gas,
+        }
+    }
+
+    pub fn value(&self) -> U256 {
+        match self {
+            Transaction::Legacy(tx) => tx.value,
+            Transaction::AA(_) => U256::ZERO, // AA txs usually call with value 0, value transfer is internal
+        }
+    }
+
+    pub fn data(&self) -> &Bytes {
+        match self {
+            Transaction::Legacy(tx) => &tx.data,
+            Transaction::AA(tx) => &tx.data,
+        }
+    }
+
+    pub fn to(&self) -> Option<Address> {
+        match self {
+            Transaction::Legacy(tx) => tx.to,
+            Transaction::AA(tx) => Some(tx.sender), // AA tx "to" is the account itself for loopback/auth
+        }
+    }
+
+    // Helper for direct access to check if it is contract creation
     pub fn is_create(&self) -> bool {
-        self.to.is_none()
+         match self {
+            Transaction::Legacy(tx) => tx.to.is_none(),
+            Transaction::AA(_) => false, // AA cannot directly deploy via "to=null" (usually via factory)
+        }
     }
 
-    /// Get the destination address (if any).
-    pub fn to_address(&self) -> Option<Address> {
-        self.to
+    // Helper for VM execution target
+    pub fn target(&self) -> Option<Address> {
+        self.to()
     }
-
-    /// Calculate the signature hash (sighash) of the transaction.
-    /// Hashes all fields except public_key and signature.
+    
     pub fn sighash(&self) -> Hash {
-        // Create a tuple of fields to hash
-        let data = (
-            self.chain_id,
-            self.nonce,
-            &self.max_priority_fee_per_gas,
-            &self.max_fee_per_gas,
-            self.gas_limit,
-            &self.to,
-            &self.value,
-            &self.data,
-            &self.access_list,
-        );
-        crate::crypto::hash_data(&data)
+        match self {
+            Transaction::Legacy(tx) => {
+                 let data = (
+                    tx.chain_id,
+                    tx.nonce,
+                    &tx.max_priority_fee_per_gas,
+                    &tx.max_fee_per_gas,
+                    tx.gas_limit,
+                    &tx.to,
+                    &tx.value,
+                    &tx.data,
+                    &tx.access_list,
+                );
+                crate::crypto::hash_data(&data)
+            }
+            Transaction::AA(tx) => {
+                 // AA SigHash excludes signature
+                 let data = (
+                    tx.chain_id,
+                    tx.nonce,
+                    &tx.max_priority_fee_per_gas,
+                    &tx.max_fee_per_gas,
+                    tx.gas_limit,
+                    &tx.sender,
+                    &tx.data,
+                    &tx.paymaster,
+                    &tx.builder_fee,
+                );
+                crate::crypto::hash_data(&data)
+            }
+        }
     }
 }
 

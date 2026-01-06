@@ -1,7 +1,7 @@
 use ockham::consensus::SimplexState;
 use ockham::crypto::{Hash, generate_keypair_from_id, hash_data, sign};
 use ockham::storage::{MemStorage, Storage};
-use ockham::types::{Address, Block, QuorumCertificate, Transaction, U256};
+use ockham::types::{Address, Block, QuorumCertificate, Transaction, LegacyTransaction, U256};
 use revm::Database;
 use std::sync::Arc;
 
@@ -40,7 +40,7 @@ fn test_delayed_staking_lifecycle() {
     // STAGE 0: FUND BOB (Block 1)
     // -------------------------------------------------------------
     println!("--- Funding Bob ---");
-    let tx_fund = Transaction {
+    let tx_fund = LegacyTransaction {
         chain_id: 1,
         nonce: 0,
         max_priority_fee_per_gas: U256::ZERO,
@@ -54,7 +54,10 @@ fn test_delayed_staking_lifecycle() {
         signature: ockham::crypto::Signature::default(),
     };
     let mut tx_fund_signed = tx_fund.clone();
-    tx_fund_signed.signature = sign(&alice_sk, &tx_fund.sighash().0);
+    // Wrap to get sighash
+    let hash = Transaction::Legacy(tx_fund.clone()).sighash();
+    tx_fund_signed.signature = sign(&alice_sk, &hash.0);
+    let tx_fund_enum = Transaction::Legacy(tx_fund_signed);
 
     // Helper to calculate roots
     let prepare_block = |blk: &mut Block, store: Arc<MemStorage>| {
@@ -76,7 +79,7 @@ fn test_delayed_staking_lifecycle() {
         QuorumCertificate::default(),
         Hash::default(),
         Hash::default(),
-        vec![tx_fund_signed],
+        vec![tx_fund_enum],
         U256::ZERO,
         0,
         vec![],
@@ -110,7 +113,7 @@ fn test_delayed_staking_lifecycle() {
     // -------------------------------------------------------------
     println!("--- Bob Staking ---");
     let stake_call = hex::decode("3a4b66f1").unwrap();
-    let tx_stake = Transaction {
+    let tx_stake = LegacyTransaction {
         chain_id: 1,
         nonce: 0,
         max_priority_fee_per_gas: U256::ZERO,
@@ -126,7 +129,9 @@ fn test_delayed_staking_lifecycle() {
         signature: ockham::crypto::Signature::default(),
     };
     let mut tx_stake_signed = tx_stake.clone();
-    tx_stake_signed.signature = sign(&bob_sk, &tx_stake.sighash().0);
+    let hash_stake = Transaction::Legacy(tx_stake.clone()).sighash();
+    tx_stake_signed.signature = sign(&bob_sk, &hash_stake.0);
+    let tx_stake_enum = Transaction::Legacy(tx_stake_signed);
 
     let sig1 = sign(&alice_sk, &b1_hash.0);
     let qc1 = QuorumCertificate {
@@ -143,7 +148,7 @@ fn test_delayed_staking_lifecycle() {
         qc1.clone(),
         Hash::default(),
         Hash::default(),
-        vec![tx_stake_signed],
+        vec![tx_stake_enum],
         U256::ZERO,
         0,
         vec![],
@@ -236,7 +241,7 @@ fn test_delayed_staking_lifecycle() {
     // -------------------------------------------------------------
     println!("--- Bob Unstaking ---");
     let unstake_call = hex::decode("2e17de78").unwrap();
-    let mut tx_unstake = Transaction {
+    let mut tx_unstake = LegacyTransaction {
         chain_id: 1,
         nonce: 1,
         max_priority_fee_per_gas: U256::ZERO,
@@ -251,7 +256,9 @@ fn test_delayed_staking_lifecycle() {
         public_key: bob_pk.clone(),
         signature: ockham::crypto::Signature::default(),
     };
-    tx_unstake.signature = sign(&bob_sk, &tx_unstake.sighash().0);
+    let hash_unstake = Transaction::Legacy(tx_unstake.clone()).sighash();
+    tx_unstake.signature = sign(&bob_sk, &hash_unstake.0);
+    let tx_unstake_enum = Transaction::Legacy(tx_unstake);
 
     // New committee for validation?
     // Wait, B13 must be signed by committee. Committee is now [Alice, Bob].
@@ -300,7 +307,7 @@ fn test_delayed_staking_lifecycle() {
         qc12,
         Hash::default(),
         Hash::default(),
-        vec![tx_unstake],
+        vec![tx_unstake_enum],
         U256::ZERO,
         0,
         vec![],
@@ -411,7 +418,7 @@ fn test_delayed_staking_lifecycle() {
     // Withdraw (Block 24)
     println!("--- Bob Withdrawing ---");
     let withdraw_call = hex::decode("3ccfd60b").unwrap();
-    let mut tx_withdraw = Transaction {
+    let mut tx_withdraw = LegacyTransaction {
         chain_id: 1,
         nonce: 2,
         max_priority_fee_per_gas: U256::ZERO,
@@ -426,7 +433,9 @@ fn test_delayed_staking_lifecycle() {
         public_key: bob_pk.clone(),
         signature: ockham::crypto::Signature::default(),
     };
-    tx_withdraw.signature = sign(&bob_sk, &tx_withdraw.sighash().0);
+    let hash_withdraw = Transaction::Legacy(tx_withdraw.clone()).sighash();
+    tx_withdraw.signature = sign(&bob_sk, &hash_withdraw.0);
+    let tx_withdraw_enum = Transaction::Legacy(tx_withdraw);
 
     // B24. Committee is just Alice again.
     // QC for B23 (Alice+Bob).
@@ -447,7 +456,7 @@ fn test_delayed_staking_lifecycle() {
         qc23,
         Hash::default(),
         Hash::default(),
-        vec![tx_withdraw],
+        vec![tx_withdraw_enum],
         U256::ZERO,
         0,
         vec![],

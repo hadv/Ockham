@@ -1,5 +1,5 @@
 use crate::crypto::{PrivateKey, sign};
-use crate::types::{Address, Block, Transaction, U256};
+use crate::types::{Address, Block, U256};
 use jsonrpsee::core::client::ClientT;
 use jsonrpsee::http_client::{HttpClient, HttpClientBuilder};
 use jsonrpsee::rpc_params;
@@ -85,7 +85,7 @@ impl OckhamClient {
             .saturating_add(priority_fee);
 
         // 4. Construct Transaction
-        let mut tx = Transaction {
+        let mut legacy_tx = crate::types::LegacyTransaction {
             chain_id,
             nonce,
             max_priority_fee_per_gas: priority_fee,
@@ -100,14 +100,17 @@ impl OckhamClient {
         };
 
         // 5. Sign
-        let sighash = tx.sighash();
+        let tx_enum = crate::types::Transaction::Legacy(legacy_tx.clone());
+        let sighash = tx_enum.sighash();
         let signature = sign(key, &sighash.0);
-        tx.signature = signature;
+        legacy_tx.signature = signature;
+
+        let tx_enum = crate::types::Transaction::Legacy(legacy_tx);
 
         // 6. Send
         let hash: crate::crypto::Hash = self
             .client
-            .request("send_transaction", rpc_params![tx])
+            .request("send_transaction", rpc_params![tx_enum])
             .await?;
         Ok(hash)
     }

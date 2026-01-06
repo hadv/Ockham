@@ -190,7 +190,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Ok(vec![])
                     }
                     NetworkEvent::TransactionReceived(tx) => {
-                        log::info!("Received Transaction from {:?}", tx.public_key);
+                        log::info!("Received Transaction from {:?}", tx.sender());
                         if let Err(e) = tx_pool.add_transaction(tx) {
                              log::warn!("Failed to add transaction: {:?}", e);
                         } else {

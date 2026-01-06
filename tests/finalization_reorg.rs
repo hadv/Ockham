@@ -1,6 +1,6 @@
 use ockham::consensus::{ConsensusAction, SimplexState};
 use ockham::crypto::{PrivateKey, PublicKey, hash_data};
-use ockham::types::{Address, Bytes, Transaction, U256};
+use ockham::types::{Address, Bytes, Transaction, LegacyTransaction, U256};
 
 #[test]
 fn test_state_ommitment_on_finalization() {
@@ -37,7 +37,7 @@ fn test_state_ommitment_on_finalization() {
 
     // Tx needs to be signed by Node 0 (Sender) and put in Node 1's Pool (Leader View 1)
     let dummy_sig = ockham::crypto::sign(&keys[0].1, &[0u8; 32]);
-    let mut tx = Transaction {
+    let mut tx = LegacyTransaction {
         chain_id: 1,
         nonce: 0,
         max_priority_fee_per_gas: U256::from(1_000_000),
@@ -51,10 +51,11 @@ fn test_state_ommitment_on_finalization() {
         signature: dummy_sig,
     };
 
-    let sighash = tx.sighash();
+    let sighash = Transaction::Legacy(tx.clone()).sighash();
     tx.signature = ockham::crypto::sign(&keys[0].1, &sighash.0);
+    let tx_enum = Transaction::Legacy(tx);
 
-    node1.tx_pool.add_transaction(tx.clone()).unwrap();
+    node1.tx_pool.add_transaction(tx_enum.clone()).unwrap();
 
     // Node 1 Proposes Block
     let actions = node1.try_propose().unwrap();

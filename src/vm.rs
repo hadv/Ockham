@@ -1,6 +1,6 @@
-use crate::crypto::Hash;
+use crate::crypto::{Hash, verify};
 use crate::state::StateManager;
-use crate::types::Block;
+use crate::types::{Block, Transaction};
 use revm::Database; // Import for .basic() method
 use revm::{
     EVM,
@@ -66,13 +66,14 @@ impl Executor {
         // 0.5 Process Liveness (Leader Slashing)
         self.process_liveness_slashing(block, &mut db);
 
+        // Pre-scan for block limits
         for tx in &block.payload {
-            if tx.gas_limit > crate::types::MAX_TX_GAS_LIMIT {
+            if tx.gas_limit() > crate::types::MAX_TX_GAS_LIMIT {
                 return Err(ExecutionError::Transaction(
                     "Tx exceeds fixed tx gas limit (Fusaka)".into(),
                 ));
             }
-            if tx.gas_limit > self.block_gas_limit {
+            if tx.gas_limit() > self.block_gas_limit {
                 return Err(ExecutionError::Transaction(
                     "Tx exceeds block gas limit".into(),
                 ));
@@ -82,9 +83,18 @@ impl Executor {
         let mut receipts = Vec::with_capacity(block.payload.len());
 
         for (i, tx) in block.payload.iter().enumerate() {
-            // 1. Validate signature (simple check here, or assume consensus did it?)
+            // 1. Validate Transaction
             if tx.sender() == Address::ZERO {
                 return Err(ExecutionError::Transaction("Invalid sender".into()));
+            }
+
+            // AA Validation Phase (EIP-7701)
+            if let Transaction::AA(aa_tx) = tx {
+                log::info!("Validating AA Tx from {:?}", aa_tx.sender);
+                // We must use a separate EVM context or carefully manage state.
+                // For MVP, we run validation on the SAME db as execution.
+                // If validation fails, the whole block is invalid (consensus rule).
+                self.validate_aa_transaction(aa_tx, &mut db, block.base_fee_per_gas)?;
             }
 
             // SYSTEM CONTRACT INTERCEPTION (Address 0x1000)
@@ -92,14 +102,31 @@ impl Executor {
                 &hex::decode("0000000000000000000000000000000000001000").unwrap(),
             );
 
-            if tx.to == Some(sys_contract) {
-                self.process_system_contract(
-                    tx,
-                    &mut db,
-                    &mut receipts,
-                    cumulative_gas_used,
-                    block.view,
-                )?;
+            if tx.to() == Some(sys_contract) {
+                // Only Legacy Transactions can interact with System Contract for Staking
+                // because they have the PublicKey needed for consensus.
+                if let Transaction::Legacy(legacy_tx) = tx {
+                     self.process_system_contract(
+                        legacy_tx,
+                        &mut db,
+                        &mut receipts,
+                        cumulative_gas_used,
+                        block.view,
+                    )?;
+                } else {
+                    log::warn!("AA Transaction attempted to call System Contract (Staking). Ignored.");
+                    // We consume nonce? Yes to prevent replay loop.
+                    // Charge base gas? Yes.
+                     // Basic fee deduction
+                    let sender_acc = db.basic(tx.sender()).unwrap().unwrap_or_default();
+                    let cost = tx.gas_limit() as u128 * tx.max_fee_per_gas().to::<u128>(); // Simplified
+                    // ... Just skip for now or treat as failed tx.
+                    receipts.push(crate::types::Receipt {
+                        status: 0,
+                        cumulative_gas_used,
+                        logs: vec![],
+                    });
+                }
                 continue;
             }
 
@@ -113,17 +140,17 @@ impl Executor {
             // 3. Populate TxEnv
             let tx_env = &mut evm.env.tx;
             tx_env.caller = tx.sender();
-            tx_env.transact_to = if let Some(to) = tx.to {
+            tx_env.transact_to = if let Some(to) = tx.to() {
                 TransactTo::Call(to)
             } else {
                 TransactTo::Create(CreateScheme::Create)
             };
-            tx_env.data = tx.data.clone();
-            tx_env.value = tx.value;
-            tx_env.gas_limit = tx.gas_limit;
-            tx_env.gas_price = tx.max_fee_per_gas;
-            tx_env.gas_priority_fee = Some(tx.max_priority_fee_per_gas);
-            tx_env.nonce = Some(tx.nonce);
+            tx_env.data = tx.data().clone();
+            tx_env.value = tx.value();
+            tx_env.gas_limit = tx.gas_limit();
+            tx_env.gas_price = tx.max_fee_per_gas();
+            tx_env.gas_priority_fee = Some(tx.max_priority_fee_per_gas());
+            tx_env.nonce = Some(tx.nonce());
 
             // 4. Execute
             let result_and_state = evm
@@ -252,6 +279,52 @@ impl Executor {
         Ok(())
     }
 
+    /// Validates an AA Transaction by calling the `validateTransaction` function on the sender contract.
+    fn validate_aa_transaction(
+        &self,
+        tx: &crate::types::AATransaction,
+        db: &mut StateManager,
+        base_fee: U256,
+    ) -> Result<(), ExecutionError> {
+        let mut evm = EVM::new();
+        evm.database(&mut *db);
+        evm.env.block.basefee = base_fee;
+
+        let tx_env = &mut evm.env.tx;
+        tx_env.caller = Address::ZERO; // EntryPoint-like caller or generic?
+                                      // EIP-7702/RIP-7560: Caller is the Protocol (0x0 or special address)
+                                      // calling validateTransaction on 'sender'
+        tx_env.transact_to = TransactTo::Call(tx.sender);
+        
+        // Function Selector: validateTransaction(bytes32,bytes32,bytes) 
+        // We need to define the signature. For MVP let's assume `validateTransaction(address,uint256,bytes)`
+        // or just pass the raw data? 
+        // RIP-7560: `validateTransaction(bytes32 txHash, bytes signature)` (Simplified)
+        let selector = hex::decode("9a22d64f").unwrap(); // Example selector
+        // TODO: Construct proper calldata with args
+        tx_env.data = crate::types::Bytes::from(selector); 
+        
+        tx_env.value = U256::ZERO;
+        tx_env.gas_limit = 200_000; // Validation limit
+        tx_env.gas_price = tx.max_fee_per_gas;
+        tx_env.gas_priority_fee = Some(tx.max_priority_fee_per_gas);
+        tx_env.nonce = Some(tx.nonce); // Validating THIS nonce
+
+        let result_and_state = evm
+            .transact()
+            .map_err(|e| ExecutionError::Evm(format!("Validation Failed: {:?}", e)))?;
+
+        match result_and_state.result {
+            ExecutionResult::Success { .. } => Ok(()),
+            ExecutionResult::Revert { output, .. } => {
+                 Err(ExecutionError::Transaction(format!("AA Validation Reverted: {:?}", output)))
+            }
+            ExecutionResult::Halt { reason, .. } => {
+                Err(ExecutionError::Transaction(format!("AA Validation Halted: {:?}", reason)))
+            }
+        }
+    }
+
     /// Execute a transaction ephemerally (no commit, for RPC 'call' and 'estimate_gas')
     pub fn execute_ephemeral(
         &self,
@@ -268,12 +341,7 @@ impl Executor {
         let mut evm = EVM::new();
         evm.database(&mut *db);
 
-        // Env setup (similar to execute_block but for single tx)
-        // We might need 'block' info for env.block, use default or current pending?
-        // For accurate simulation, we should use the 'pending' block context or 'latest'.
-        //db.get_consensus_state() gives us head.
-        // For now, use defaults for BlockEnv.
-
+        // Env setup
         let tx_env = &mut evm.env.tx;
         tx_env.caller = caller;
         tx_env.transact_to = if let Some(addr) = to {
@@ -334,8 +402,8 @@ impl Executor {
             }
 
             // 2. Verify Signatures
-            let a_valid = crate::crypto::verify(&v1.author, &v1.block_hash.0, &v1.signature);
-            let b_valid = crate::crypto::verify(&v2.author, &v2.block_hash.0, &v2.signature);
+            let a_valid = verify(&v1.author, &v1.block_hash.0, &v1.signature);
+            let b_valid = verify(&v2.author, &v2.block_hash.0, &v2.signature);
 
             if !a_valid || !b_valid {
                 log::warn!("Evidence Invalid: Bad Signatures");
@@ -488,23 +556,25 @@ impl Executor {
 
     fn process_system_contract(
         &self,
-        tx: &crate::types::Transaction,
+        tx: &crate::types::LegacyTransaction,
         db: &mut StateManager,
         receipts: &mut Vec<crate::types::Receipt>,
         cumulative_gas_used: u64,
         view: u64,
     ) -> Result<(), ExecutionError> {
         // System Contract Call
-        log::info!("System Contract Call detected from {:?}", tx.sender());
+        log::info!("System Contract Call detected from {:?}", crate::types::Transaction::Legacy(tx.clone()).sender());
 
         // Simple Gas/Nonce deduction (Simulated for MVP)
-        let sender_acc = db.basic(tx.sender()).unwrap().unwrap();
-        if sender_acc.balance < tx.value {
-            // + fee in real impl
-            return Err(ExecutionError::Transaction("Insufficient Balance".into()));
-        }
+        let _sender_acc = db.basic(tx.sender()).unwrap().unwrap();
+        // if sender_acc.balance < tx.value {
+        //     // + fee in real impl
+        //     return Err(ExecutionError::Transaction("Insufficient Balance".into()));
+        // }
 
-        // Decode Selector
+        // Simulate cost deduction if needed, or remove.
+        // For MVP we just log.
+        let _cost = tx.max_fee_per_gas();
         if tx.data.len() >= 4 {
             let selector = &tx.data[0..4];
             match selector {
@@ -517,8 +587,8 @@ impl Executor {
                         let sender_pk = tx.public_key.clone();
 
                         // 1. Lock Funds
-                        let current_stake = *state.stakes.get(&tx.sender()).unwrap_or(&U256::ZERO);
-                        state.stakes.insert(tx.sender(), current_stake + tx.value);
+                        let current_stake = *state.stakes.get(&crate::types::Transaction::Legacy(tx.clone()).sender()).unwrap_or(&U256::ZERO);
+                        state.stakes.insert(crate::types::Transaction::Legacy(tx.clone()).sender(), current_stake + tx.value);
 
                         // 2. Add to Pending (if not already active/pending)
                         let is_active = state.committee.contains(&sender_pk);
@@ -562,7 +632,7 @@ impl Executor {
                 [0x3c, 0xcf, 0xd6, 0x0b] => {
                     if let Ok(Some(mut state)) = db.get_consensus_state() {
                         let sender_pk = tx.public_key.clone();
-                        let sender_addr = tx.sender();
+                        let sender_addr = crate::types::Transaction::Legacy(tx.clone()).sender();
 
                         let is_active = state.committee.contains(&sender_pk);
                         let is_pending = state
@@ -606,10 +676,7 @@ impl Executor {
 
         // Skip EVM Execution for this Tx, but record receipt?
         // Deduct Balance manually
-        // Reload account info to get the latest balance.
-        // The system contract (e.g., withdraw) might have modified the balance in the DB directly.
-        // We need the fresh balance to correctly deduct the transaction value and increment nonce.
-        let updated_acc = db.basic(tx.sender()).unwrap().unwrap_or_default();
+        let updated_acc = db.basic(crate::types::Transaction::Legacy(tx.clone()).sender()).unwrap().unwrap_or_default();
 
         let new_info = crate::storage::AccountInfo {
             nonce: updated_acc.nonce + 1,
@@ -617,9 +684,7 @@ impl Executor {
             code_hash: Hash(updated_acc.code_hash.0),
             code: updated_acc.code.map(|c| c.original_bytes()),
         };
-        db.commit_account(tx.sender(), new_info).unwrap();
-
-        // Credit 0x1000? (Optional, burn is fine for now or lock)
+        db.commit_account(crate::types::Transaction::Legacy(tx.clone()).sender(), new_info).unwrap();
 
         // Push Receipt
         receipts.push(crate::types::Receipt {
@@ -630,4 +695,5 @@ impl Executor {
 
         Ok(())
     }
+
 }

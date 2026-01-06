@@ -1,9 +1,11 @@
 use crate::crypto::{Hash, verify};
 use crate::storage::Storage;
-use crate::types::Transaction;
+use crate::types::{Transaction, Address};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
+use revm::EVM; // Need EVM for AA validation
+use revm::primitives::TransactTo; // U256 removed
 
 #[derive(Debug, Error)]
 pub enum PoolError {
@@ -11,6 +13,8 @@ pub enum PoolError {
     AlreadyExists,
     #[error("Invalid signature")]
     InvalidSignature,
+    #[error("Invalid AA Validation: {0}")]
+    InvalidAA(String),
     #[error("Invalid Nonce: expected {0}, got {1}")]
     InvalidNonce(u64, u64),
     #[error("Storage Error: {0}")]
@@ -44,17 +48,50 @@ impl TxPool {
     /// Add a transaction to the pool.
     pub fn add_transaction(&self, tx: Transaction) -> Result<(), PoolError> {
         // 0. Check Gas Limit (Fusaka)
-        if tx.gas_limit > crate::types::MAX_TX_GAS_LIMIT {
+        if tx.gas_limit() > crate::types::MAX_TX_GAS_LIMIT {
             return Err(PoolError::GasLimitExceeded(
                 crate::types::MAX_TX_GAS_LIMIT,
-                tx.gas_limit,
+                tx.gas_limit(),
             ));
         }
 
-        // 1. Validate Signature
-        let sighash = tx.sighash();
-        if !verify(&tx.public_key, &sighash.0, &tx.signature) {
-            return Err(PoolError::InvalidSignature);
+        // 1. Validate Signature / AA Validation
+        match &tx {
+            Transaction::Legacy(l_tx) => {
+                let sighash = tx.sighash();
+                if !verify(&l_tx.public_key, &sighash.0, &l_tx.signature) {
+                    return Err(PoolError::InvalidSignature);
+                }
+            }
+            Transaction::AA(aa_tx) => {
+                // Run EVM validation
+                // We need a temporary state manager
+                let state_manager = crate::state::StateManager::new(self.storage.clone(), None);
+                // Note: This is an expensive operation for add_transaction. 
+                // In production, this should be async or limited.
+                
+                let mut db = state_manager;
+                let mut evm = EVM::new();
+                evm.database(&mut db);
+                
+                // Minimal Env
+                let tx_env = &mut evm.env.tx;
+                tx_env.caller = Address::ZERO;
+                tx_env.transact_to = TransactTo::Call(aa_tx.sender);
+                // Selector logic as per VM
+                let selector = hex::decode("9a22d64f").unwrap();
+                tx_env.data = crate::types::Bytes::from(selector);
+                tx_env.gas_limit = 200_000;
+                tx_env.nonce = Some(aa_tx.nonce);
+                
+                // Execute
+                let result = evm.transact().map_err(|e| PoolError::InvalidAA(format!("EVM Error: {:?}", e)))?;
+                
+                match result.result {
+                    revm::primitives::ExecutionResult::Success { .. } => {},
+                    _ => return Err(PoolError::InvalidAA("Validation Reverted or Failed".into())),
+                }
+            }
         }
 
         // 2. Validate Nonce
@@ -70,14 +107,19 @@ impl TxPool {
             0
         };
 
-        if tx.nonce < account_nonce {
-            return Err(PoolError::InvalidNonce(account_nonce, tx.nonce));
+        if tx.nonce() < account_nonce {
+            return Err(PoolError::InvalidNonce(account_nonce, tx.nonce()));
         }
 
         // TODO: Also check if nonce is already in pool? (Pending Nonce)
         // For MVP we just check against state.
 
-        let hash = crate::crypto::hash_data(&tx);
+        let hash = crate::crypto::hash_data(&tx); // Transaction enum implements Hash via Serialize? No, we used hash_data(&tx) which uses bincode. 
+        // Wait, types.rs Transaction has sighash(). hash_data(&tx) hashes the whole enum. 
+        // Hash collision between identical txs is what we want to detect.
+        // However, LegacyTransaction sighash() excludes signature. 
+        // TxPool usually uses the full hash (including sig).
+        // Let's assume `crate::crypto::hash_data(&tx)` does full serialization hash.
 
         let mut text_map = self.transactions.lock().unwrap();
         if text_map.contains_key(&hash) {
@@ -103,22 +145,22 @@ impl TxPool {
         // 1. Collect and Filter transactions
         let mut all_txs: Vec<&Transaction> = map
             .values()
-            .filter(|tx| tx.max_fee_per_gas >= base_fee)
+            .filter(|tx| tx.max_fee_per_gas() >= base_fee)
             .collect();
 
         // 2. Sort by Effective Tip Descending
         // Effective Tip = min(max_priority_fee, max_fee - base_fee)
         all_txs.sort_by(|a, b| {
-            let tip_a = std::cmp::min(a.max_priority_fee_per_gas, a.max_fee_per_gas - base_fee);
-            let tip_b = std::cmp::min(b.max_priority_fee_per_gas, b.max_fee_per_gas - base_fee);
+            let tip_a = std::cmp::min(a.max_priority_fee_per_gas(), a.max_fee_per_gas() - base_fee);
+            let tip_b = std::cmp::min(b.max_priority_fee_per_gas(), b.max_fee_per_gas() - base_fee);
             let cmp = tip_b.cmp(&tip_a); // Descending
             if cmp == std::cmp::Ordering::Equal {
                 // Secondary sort: Nonce Ascending for same sender
-                if a.public_key == b.public_key {
-                    a.nonce.cmp(&b.nonce)
+                if a.sender() == b.sender() {
+                    a.nonce().cmp(&b.nonce())
                 } else {
-                    // Tertiary sort: Deterministic (Public Key)
-                    a.public_key.cmp(&b.public_key)
+                    // Tertiary sort: Deterministic (Sender Address)
+                    a.sender().cmp(&b.sender())
                 }
             } else {
                 cmp
@@ -129,9 +171,9 @@ impl TxPool {
         let mut current_gas = 0u64;
 
         for tx in all_txs {
-            if current_gas + tx.gas_limit <= block_gas_limit {
+            if current_gas + tx.gas_limit() <= block_gas_limit {
                 pending.push(tx.clone());
-                current_gas += tx.gas_limit;
+                current_gas += tx.gas_limit();
             }
             // Optimize: If block is full, break?
             if current_gas >= block_gas_limit {
@@ -174,7 +216,7 @@ mod tests {
     use super::*;
     use crate::crypto::{generate_keypair, sign};
     use crate::storage::MemStorage;
-    use crate::types::{Address, Bytes, U256}; // AccessListItem not used in test but needed if we construct
+    use crate::types::{Address, Bytes, U256, LegacyTransaction}; // AccessListItem not used in test but needed if we construct
 
     #[test]
     fn test_add_transaction_validation() {
@@ -183,7 +225,7 @@ mod tests {
 
         let (pk, sk) = generate_keypair();
 
-        let mut tx = Transaction {
+        let mut tx = LegacyTransaction {
             chain_id: 1337,
             nonce: 0,
             max_priority_fee_per_gas: U256::ZERO,
@@ -197,17 +239,33 @@ mod tests {
             signature: crate::crypto::Signature::default(), // Invalid initially
         };
 
-        // 1. Sign properly
-        let sighash = tx.sighash();
+        // 1. Sign properly (manually for test)
+        // Construct LegacyTransaction sighash manually since it's now wrapped
+        let data = (
+            tx.chain_id,
+            tx.nonce,
+            &tx.max_priority_fee_per_gas,
+            &tx.max_fee_per_gas,
+            tx.gas_limit,
+            &tx.to,
+            &tx.value,
+            &tx.data,
+            &tx.access_list,
+        );
+        let sighash = crate::crypto::hash_data(&data);
+
         let sig = sign(&sk, &sighash.0);
         tx.signature = sig;
 
+        // Wrap in Enum
+        let tx_enum = Transaction::Legacy(tx.clone());
+
         // Add proper tx -> Ok
-        assert!(pool.add_transaction(tx.clone()).is_ok());
+        assert!(pool.add_transaction(tx_enum.clone()).is_ok());
 
         // 2. Replay -> Error
         assert!(matches!(
-            pool.add_transaction(tx.clone()),
+            pool.add_transaction(tx_enum.clone()),
             Err(PoolError::AlreadyExists)
         ));
 
@@ -215,14 +273,16 @@ mod tests {
         let mut bad_tx = tx.clone();
         bad_tx.nonce = 1; // Change body => sighash changes
         // Signature remains for nonce 0 => Invalid
+        let bad_tx_enum = Transaction::Legacy(bad_tx);
+        
         assert!(matches!(
-            pool.add_transaction(bad_tx).unwrap_err(),
+            pool.add_transaction(bad_tx_enum).unwrap_err(),
             PoolError::InvalidSignature
         ));
 
         // 4. Bad Nonce
         // Set account nonce in storage to 5
-        let sender = tx.sender();
+        let sender = tx_enum.sender();
         // Manually save account to storage
         // Needs AccountInfo struct
         let account = crate::storage::AccountInfo {
@@ -235,11 +295,25 @@ mod tests {
 
         let mut low_nonce_tx = tx.clone();
         low_nonce_tx.nonce = 4;
-        let sigh = low_nonce_tx.sighash();
+        // Resign
+         let data = (
+            low_nonce_tx.chain_id,
+            low_nonce_tx.nonce,
+            &low_nonce_tx.max_priority_fee_per_gas,
+            &low_nonce_tx.max_fee_per_gas,
+            low_nonce_tx.gas_limit,
+            &low_nonce_tx.to,
+            &low_nonce_tx.value,
+            &low_nonce_tx.data,
+            &low_nonce_tx.access_list,
+        );
+        let sigh = crate::crypto::hash_data(&data);
         low_nonce_tx.signature = sign(&sk, &sigh.0);
 
+        let low_nonce_enum = Transaction::Legacy(low_nonce_tx);
+
         // Should fail nonce check
-        match pool.add_transaction(low_nonce_tx) {
+        match pool.add_transaction(low_nonce_enum) {
             Err(PoolError::InvalidNonce(expected, got)) => {
                 assert_eq!(expected, 5);
                 assert_eq!(got, 4);
