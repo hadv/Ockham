@@ -3,7 +3,8 @@ use ockham::state::StateManager;
 use ockham::storage::{AccountInfo, MemStorage, Storage};
 use ockham::tx_pool::{PoolError, TxPool};
 use ockham::types::{
-    Address, Block, Bytes, MAX_TX_GAS_LIMIT, QuorumCertificate, Transaction, U256,
+    Address, Block, Bytes, LegacyTransaction, MAX_TX_GAS_LIMIT, QuorumCertificate, Transaction,
+    U256,
 };
 use ockham::vm::{ExecutionError, Executor};
 use std::sync::{Arc, Mutex};
@@ -32,7 +33,7 @@ fn test_transaction_gas_limit() {
     let executor = Executor::new(state, 30_000_000);
 
     // 1. Valid Tx (Below Limit)
-    let mut tx_ok = Transaction {
+    let mut tx_ok = LegacyTransaction {
         chain_id: 1,
         nonce: 0,
         max_priority_fee_per_gas: U256::from(1_000_000_000u64), // 1 Gwei
@@ -45,18 +46,20 @@ fn test_transaction_gas_limit() {
         public_key: pk.clone(),
         signature: ockham::crypto::Signature::default(),
     };
-    tx_ok.signature = sign(&sk, &tx_ok.sighash().0);
+    let hash_ok = Transaction::Legacy(Box::new(tx_ok.clone())).sighash();
+    tx_ok.signature = sign(&sk, &hash_ok.0);
+    let tx_ok_enum = Transaction::Legacy(Box::new(tx_ok));
 
     let mut block = Block::new_dummy(pk.clone(), 1, Hash::default(), QuorumCertificate::default());
     block.base_fee_per_gas = U256::from(10_000_000); // 0.01 Gwei
-    block.payload = vec![tx_ok];
+    block.payload = vec![tx_ok_enum];
 
     if let Err(e) = executor.execute_block(&mut block) {
         panic!("Valid Transaction Failed: {:?}", e);
     }
 
     // 2. Invalid Tx (Above Limit)
-    let mut tx_bad = Transaction {
+    let mut tx_bad = LegacyTransaction {
         chain_id: 1,
         nonce: 1,
         max_priority_fee_per_gas: U256::ZERO,
@@ -69,11 +72,13 @@ fn test_transaction_gas_limit() {
         public_key: pk.clone(),
         signature: ockham::crypto::Signature::default(),
     };
-    tx_bad.signature = sign(&sk, &tx_bad.sighash().0);
+    let hash_bad = Transaction::Legacy(Box::new(tx_bad.clone())).sighash();
+    tx_bad.signature = sign(&sk, &hash_bad.0);
+    let tx_bad_enum = Transaction::Legacy(Box::new(tx_bad));
 
     let mut block_bad =
         Block::new_dummy(pk.clone(), 2, Hash::default(), QuorumCertificate::default());
-    block_bad.payload = vec![tx_bad];
+    block_bad.payload = vec![tx_bad_enum];
 
     let res = executor.execute_block(&mut block_bad);
     match res {
@@ -93,7 +98,7 @@ fn test_pool_gas_limit() {
     let pool = TxPool::new(storage);
     let (pk, sk) = generate_keypair();
 
-    let mut tx = Transaction {
+    let mut tx = LegacyTransaction {
         chain_id: 1,
         nonce: 0,
         max_priority_fee_per_gas: U256::ZERO,
@@ -106,8 +111,10 @@ fn test_pool_gas_limit() {
         public_key: pk.clone(),
         signature: ockham::crypto::Signature::default(),
     };
-    tx.signature = sign(&sk, &tx.sighash().0);
+    let hash = Transaction::Legacy(Box::new(tx.clone())).sighash();
+    tx.signature = sign(&sk, &hash.0);
+    let tx_enum = Transaction::Legacy(Box::new(tx));
 
-    let res = pool.add_transaction(tx);
+    let res = pool.add_transaction(tx_enum);
     assert!(matches!(res, Err(PoolError::GasLimitExceeded(..))));
 }
