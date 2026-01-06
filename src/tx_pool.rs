@@ -216,7 +216,7 @@ impl TxPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::{generate_keypair, sign, Signature};
+    use crate::crypto::{Signature, generate_keypair, sign};
     use crate::storage::MemStorage;
     use crate::types::{Address, Bytes, LegacyTransaction, U256}; // AccessListItem not used in test but needed if we construct
 

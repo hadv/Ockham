@@ -616,33 +616,33 @@ impl Executor {
                 // unstake() -> 0x2e17de78
                 [0x2e, 0x17, 0xde, 0x78] => {
                     if let Ok(Some(mut state)) = db.get_consensus_state() {
-                        let sender_addr = crate::types::Transaction::Legacy(Box::new(tx.clone())).sender();
-                        if let Some(pos) = state
-                            .committee
-                            .iter()
-                            .position(|pk| crate::types::keccak256(pk.0.to_bytes())[12..] == sender_addr.0)
-                        {
+                        let sender_addr =
+                            crate::types::Transaction::Legacy(Box::new(tx.clone())).sender();
+                        if let Some(pos) = state.committee.iter().position(|pk| {
+                            crate::types::keccak256(pk.0.to_bytes())[12..] == sender_addr.0
+                        }) {
                             let pk = state.committee[pos].clone();
                             let exit_view = view + 10;
                             state.exiting_validators.push((pk, exit_view));
                             db.save_consensus_state(&state).unwrap();
                             log::info!("Validator Unstaked/Exiting: {:?}", sender_addr);
                         } else {
-                             log::warn!("Unstake failed: Not in committee");
+                            log::warn!("Unstake failed: Not in committee");
                         }
                     }
                 }
                 // withdraw() -> 0x3ccfd60b
                 [0x3c, 0xcf, 0xd6, 0x0b] => {
                     if let Ok(Some(mut state)) = db.get_consensus_state() {
-                         let sender_pk = tx.public_key.clone();
-                         let sender_addr = crate::types::Transaction::Legacy(Box::new(tx.clone())).sender();
+                        let sender_pk = tx.public_key.clone();
+                        let sender_addr =
+                            crate::types::Transaction::Legacy(Box::new(tx.clone())).sender();
 
-                         let is_active = state.committee.contains(&sender_pk);
-                         let is_pending = state
-                             .pending_validators
-                             .iter()
-                             .any(|(pk, _)| *pk == sender_pk);
+                        let is_active = state.committee.contains(&sender_pk);
+                        let is_pending = state
+                            .pending_validators
+                            .iter()
+                            .any(|(pk, _)| *pk == sender_pk);
                         let is_exiting = state
                             .exiting_validators
                             .iter()
