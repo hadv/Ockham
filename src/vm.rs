@@ -298,13 +298,49 @@ impl Executor {
         // calling validateTransaction on 'sender'
         tx_env.transact_to = TransactTo::Call(tx.sender);
 
-        // Function Selector: validateTransaction(bytes32,bytes32,bytes)
-        // We need to define the signature. For MVP let's assume `validateTransaction(address,uint256,bytes)`
-        // or just pass the raw data?
-        // RIP-7560: `validateTransaction(bytes32 txHash, bytes signature)` (Simplified)
-        let selector = hex::decode("9a22d64f").unwrap(); // Example selector
-        // TODO: Construct proper calldata with args
-        tx_env.data = crate::types::Bytes::from(selector);
+        // Function Selector: validateTransaction(bytes32,bytes)
+        // Keccak256("validateTransaction(bytes32,bytes)")
+        let selector = crate::types::keccak256(b"validateTransaction(bytes32,bytes)");
+        let selector_bytes = &selector[0..4];
+
+        // Prepare Arguments:
+        // 1. txHash (32 bytes)
+        // 2. signature (bytes) - Dynamic type
+
+        let tx_enum = crate::types::Transaction::AA(Box::new(tx.clone()));
+        let tx_hash = tx_enum.sighash();
+
+        let mut data = Vec::new();
+        data.extend_from_slice(selector_bytes);
+
+        // -- Head --
+        // Arg 1: txHash (32 bytes)
+        data.extend_from_slice(&tx_hash.0);
+
+        // Arg 2: Offset to signature (32 bytes)
+        // Offset is calculated from the start of arguments (after selector).
+        // Arg 1 is 32 bytes. Arg 2 (offset) is 32 bytes.
+        // So dynamic data starts at 32 + 32 = 64 (0x40).
+        data.extend_from_slice(&[0u8; 31]);
+        data.push(0x40);
+
+        // -- Tail --
+        // Signature Length (32 bytes)
+        let sig_len = U256::from(tx.signature.len());
+        // U256 to bytes big endian
+        data.extend_from_slice(&sig_len.to_be_bytes::<32>());
+
+        // Signature Data
+        data.extend_from_slice(&tx.signature);
+
+        // Padding (round up to multiple of 32)
+        let rem = tx.signature.len() % 32;
+        if rem != 0 {
+            let pad = 32 - rem;
+            data.extend(std::iter::repeat_n(0, pad));
+        }
+
+        tx_env.data = crate::types::Bytes::from(data);
 
         tx_env.value = U256::ZERO;
         tx_env.gas_limit = 200_000; // Validation limit
